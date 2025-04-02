@@ -1,0 +1,10 @@
+openpyxl
+promptflow.client
+openai
+azure-search-documents
+azure-identity
+azure-ai-openai
+#azure-ai-contentunderstanding
+PyMuPDF
+Pillow
+python-dotenv
