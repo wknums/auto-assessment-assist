@@ -75,3 +75,6 @@ When this works, you can start customizing the accelerator for your own use.
 3.  Use existing image folders (no PDF processing):
 
 *python awreason.py --images_folder1 "path/to/images" --prompt "Analyze these images" --output "results.txt"*
+
+### Limitations:
+Due to existing limits with the o1 model, the maximum number of images that the model can analyze in one request is 50. This repo concatenates 2 consecutive page images into a single image without noticeable loss in vision quality and therefore we can process pdfs with up to 100 pages. (combined total if in 2 documents with even page numbers as remainder pages are not combined) 
