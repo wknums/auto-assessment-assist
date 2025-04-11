@@ -1,0 +1,42 @@
+┌────────────────────────────────┬───────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬─────────────────────────┐
+│         Rubric Section        │   Grade   │                                       Justification/Comments                                          │ % of Final Grade (of 10% per section) │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 1. Clarity and Conciseness    │     5     │ The instructions are exceptionally clear and concise. Each step is easy to follow, with no ambiguity.  │                10%                  │
+│                                │           │ The language is direct and every requirement is stated without unnecessary wording.                   │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 2. Structure and Organization  │     5     │ The document follows a logical order (Eligibility, Documents, Process). Headings and bullet points     │                10%                  │
+│                                │           │ make it easy to navigate. Overall, it is very well organized.                                         │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 3. Completeness of Information │     5     │ All essential details (eligibility, required forms, fees, contact info) are included with no gaps.     │                10%                  │
+│                                │           │ The guide covers driver’s license renewal, vehicle registration renewal, and traffic fines.           │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 4. Accuracy of Information     │     5     │ Nothing appears outdated or incorrect; the fee amounts, deadlines, and processes are consistent and    │                10%                  │
+│                                │           │ align well with the stated requirements.                                                             │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 5. Readability & Language Use  │     5     │ The language is professional and straightforward. Grammar and tone are appropriate, making the text   │                10%                  │
+│                                │           │ easy to read and understand.                                                                         │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 6. Visual Presentation         │     5     │ The formatting (use of bold headings, bullet points, spacing) is clear and visually appealing.         │                10%                  │
+│                                │           │ The layout aids in quick scanning of information.                                                   │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 7. Use of Headings/Subheadings │     5     │ Headings and subheadings (e.g., “Eligibility Criteria,” “Required Documents,” “Payment Process”)       │                10%                  │
+│                                │           │ are effectively employed throughout, greatly enhancing clarity.                                       │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 8. Relevance of Examples/Tips  │     5     │ The provided “Useful Tips” and explanations for payment methods are highly relevant. They help         │                10%                  │
+│                                │           │ illustrate important points and give practical guidance.                                             │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 9. Contact Information         │     5     │ Contact details (phone, email, website) and office hours are clearly stated and easy to locate,        │                10%                  │
+│                                │           │ ensuring readers know how to get further help.                                                       │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│ 10. Consistency in Terminology │     5     │ Terminology (e.g., “DMV,” “AUD,” “TFN,” “DL-123,” “VR-456”) is applied consistently in all sections,   │                10%                  │
+│                                │           │ avoiding confusion.                                                                                  │                                     │
+├────────────────────────────────┼───────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────┤
+│              TOTAL             │     –     │ All sections scored 5, each worth 10%.                                                                 │             100% total              │
+└────────────────────────────────┴───────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────────────────┘
+
+Overall Feedback:  
+• The document is exceptionally well-crafted, offering clear and concise instructions arranged in a logical manner.  
+• It includes all necessary details regarding processes, documentation, fees, and contact information.  
+• The language is professional, the headings are well used, and the guide is thorough yet concise.  
+
+Final Grade: 100%

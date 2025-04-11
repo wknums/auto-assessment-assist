@@ -1,0 +1,10 @@
+PyMuPDF
+openai
+tenacity
+langchain
+tiktoken
+azure-search-documents==11.6.0b4
+azure-core
+azure-identity
+loguru
+#azure content understanding client is not available in pypi - using preview code in python folder

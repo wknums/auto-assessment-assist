@@ -1,0 +1,5 @@
+{
+   "team panthers": "provide only the grade score of the {search_query} based on the following information: {context}",
+   "team hawks": "provide only the grade score of the {search_query} based on the following information: {context}"
+  
+}

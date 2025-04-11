@@ -1,12 +1,13 @@
 # Copyright (c) Microsoft. All rights reserved.
 # Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
-# spme of the code was sourced and adapted from: the Python code snippet provided by Azure Foundry Chat Playground
+# some of the code was sourced and adapted from: the Python code snippet provided by Azure Foundry Chat Playground
 
 
 import os
 import base64
 import argparse
 import sys
+import json
 from pathlib import Path
 from openai import AzureOpenAI  
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider  
@@ -28,6 +29,15 @@ def read_prompt_from_file(file_path):
             return f.read().strip()
     except Exception as e:
         print(f"Error reading prompt file {file_path}: {e}")
+        return None
+
+def read_markdown_file(file_path):
+    """Read content from a Markdown file."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except Exception as e:
+        print(f"Error reading Markdown file {file_path}: {e}")
         return None
 
 def ensure_directory_exists(file_path):
@@ -115,17 +125,40 @@ def find_pdfs_in_directory(directory_path):
     
     return pdf_files
 
-def save_response_to_file(response_text, file_path):
+def save_response_to_file(response_text, file_path, is_json=False):
     """Save model response to the specified file path."""
     try:
         ensure_directory_exists(file_path)
         with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(response_text)
+            if is_json:
+                # If it's already a dictionary, dump as JSON
+                if isinstance(response_text, dict):
+                    json.dump(response_text, f, indent=2)
+                else:
+                    # Try to parse as JSON before saving
+                    try:
+                        json_data = json.loads(response_text)
+                        json.dump(json_data, f, indent=2)
+                    except json.JSONDecodeError:
+                        # If not valid JSON, save as plain text
+                        f.write(response_text)
+                        print("WARNING: Response was not valid JSON. Saving as plain text.")
+            else:
+                f.write(response_text)
         print(f"Response saved to: {file_path}")
         return True
     except Exception as e:
         print(f"Error saving response to {file_path}: {e}")
         return False
+
+def read_json_template(template_path):
+    """Read a JSON template file."""
+    try:
+        with open(template_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error reading JSON template file {template_path}: {e}")
+        return None
 
 def main():
     # Parse command line arguments
@@ -146,6 +179,12 @@ def main():
     prompt_group.add_argument('--prompt', type=str, help='Text prompt to send to the model')
     prompt_group.add_argument('--promptfile', type=str, help='Path to file containing the prompt text')
     
+    # Add markdown file option
+    parser.add_argument('--md_file', type=str, help='Path to Markdown file to add as context')
+    
+    # Add JSON template option for structured output
+    parser.add_argument('--jsonout_template', type=str, help='Path to JSON template file for structured output')
+    
     # Add required output filepath parameter
     parser.add_argument('--output', type=str, required=True, help='Path to save the model response')
     
@@ -163,7 +202,41 @@ def main():
         if not prompt_text:
             print("Failed to read prompt from file. Exiting.")
             return
-
+    
+    # If a markdown file is provided, read its content
+    markdown_content = None
+    if args.md_file:
+        markdown_content = read_markdown_file(args.md_file)
+        if not markdown_content:
+            print("Failed to read Markdown file. Exiting.")
+            return
+        print(f"Loaded Markdown content from: {args.md_file}")
+        
+        # If we also have a prompt, combine them
+        if prompt_text:
+            prompt_text = f"{prompt_text}\n\nHere is additional context from the Markdown file:\n\n{markdown_content}"
+        else:
+            prompt_text = markdown_content
+    
+    # Load JSON template if specified
+    json_template = None
+    if args.jsonout_template:
+        json_template = read_json_template(args.jsonout_template)
+        if not json_template:
+            print("Failed to read JSON template. Exiting.")
+            return
+        print(f"Loaded JSON template from: {args.jsonout_template}")
+        
+        # Check if we need to enhance the prompt with JSON template info
+        if prompt_text and json_template:
+            template_description = json_template.get("description", "")
+            if template_description:
+                prompt_text += f"\n\nYou will provide your analysis in a structured JSON format. {template_description}"
+            
+            prompt_text += "\n\nPlease match the exact structure of the following JSON template in your response:"
+            prompt_text += f"\n```json\n{json.dumps(json_template, indent=2)}\n```\n"
+            prompt_text += "\nYour response must be valid JSON that follows this exact structure."
+    
     # Set up image processing directories
     temp_dir = args.tempdir if args.tempdir else tempfile.mkdtemp()
     ensure_directory_exists(temp_dir)
@@ -239,7 +312,7 @@ def main():
 
     # Retrieve environment variables with defaults
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "o1")
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_O1", "o1")
 
     # Debug: Print assigned environment variables
     print("Azure OpenAI Endpoint:", endpoint)
@@ -323,15 +396,60 @@ def main():
                 except Exception as e:
                     print(f"Error processing image {img_path}: {e}")
     
+    # Configure additional parameters for the O1 model
+    completion_params = {
+        "model": deployment,
+        "messages": messages,
+        #"temperature": 0.2,  # Lower temperature for more deterministic results - not supported by O1
+        "seed": 31457  # For more consistent results across runs
+    }
+    
+    # Check API version and adjust parameters accordingly
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2023-12-01-preview")
+    print(f"Using API version: {api_version}")
+    
+    # For newer API versions (2024-02-01-preview and later)
+    if api_version.startswith("2024"):
+        completion_params["max_completion_tokens"] = 15000
+        # Add reasoning_effort only if we're not using structured output
+        if not json_template:
+            completion_params["reasoning_effort"] = "high"
+    else:
+        # For older API versions
+        completion_params["max_tokens"] = 15000
+    
+    # Add response_format parameter for JSON output if template was provided
+    if json_template:
+        completion_params["response_format"] = {"type": "json_object"}
+        print("Requesting structured JSON output from the model")
+    
     # Send the request to the o1 model
     print("\nSending request to o1 model...")
-    completion = client.chat.completions.create(  
-        model=deployment,  
-        messages=messages,
-        reasoning_effort="high",
-        max_completion_tokens=15000,  # o1 requirement
-        seed=31457  # o1 for more consistent results
-    )
+    try:
+        completion = client.chat.completions.create(**completion_params)
+    except Exception as e:
+        # If the first attempt fails, try without the potentially problematic parameters
+        print(f"Error in initial request: {e}")
+        print("Retrying with simplified parameters...")
+        
+        # Create a simplified parameter set (removing reasoning_effort)
+        fallback_params = {
+            "model": deployment,
+            "messages": messages
+            #,            "temperature": 0.2   #not supported by O1
+        }
+        
+        # Use appropriate max tokens parameter based on API version
+        if api_version.startswith("2024"):
+            fallback_params["max_completion_tokens"] = 15000
+        else:
+            fallback_params["max_tokens"] = 15000
+            
+        # Keep response_format if template was provided
+        if json_template:
+            fallback_params["response_format"] = {"type": "json_object"}
+        
+        completion = client.chat.completions.create(**fallback_params)
 
     # Get the response content
     response_content = completion.choices[0].message.content
@@ -348,10 +466,14 @@ def main():
     
     # Print the response
     print("\nO1 Response:")
-    print(response_content)
+    if len(response_content) > 1000:
+        # Print first 500 and last 500 characters if response is long
+        print(response_content[:500] + "...\n...\n..." + response_content[-500:])
+    else:
+        print(response_content)
     
-    # Save the response to the specified output file
-    save_response_to_file(response_content, args.output)
+    # Save the response to the specified output file (as JSON if template was provided)
+    save_response_to_file(response_content, args.output, is_json=bool(json_template))
     
     # Clean up temporary directory if we created one
     if not args.tempdir and temp_dir and os.path.exists(temp_dir):
