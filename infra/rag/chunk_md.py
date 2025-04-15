@@ -1,3 +1,11 @@
+# Copyright (c) Microsoft. All rights reserved.
+# Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
+
+# This script is used to chunk markdown text into smaller pieces based on specific rules.
+# It handles headings, lists, tables, and page breaks to ensure that the resulting chunks are organized effectively.
+# Originally written by W.Knupp , GBB AI, Microsoft and published  here: https://github.com/wknums/auto-assessment-assist
+
+
 import os
 import sys
 import re
