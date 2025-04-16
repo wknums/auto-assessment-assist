@@ -175,26 +175,26 @@ Due to existing limits with the o1 model, the maximum number of images that the 
 
 is a sample AI accelerator to help automate all kinds of document based assessments and value extractions from unstructured documents and completing an Excel based spreadsheet with the results from the assessment or value extraction. 
 **Use cases include:**
-	 - **assist educators to ease their workload** related to fairly and consistently grading and assessing assignments of their learners where the results need to be collected in an Excel spreadsheet range.
-	**- assist planning assessors** needing to automate the extraction of planning metrics from unstructured documents and consolidating these in an Excel spreadsheet range.
-	**- assist planning assessors** needing to automate the evaluation/ assessment of planning metrics from unstructured documents and consolidating these in an Excel spreadsheet range.
-	**- scoring quiz answers** using AI and consolidating these in an Excel spreadsheet range. (this is provided as an example configuration as "sample-project" in the repo)
+- **assist educators to ease their workload** related to fairly and consistently grading and assessing assignments of their learners where the results need to be collected in an Excel spreadsheet range.
+- **assist planning assessors** needing to automate the extraction of planning metrics from unstructured documents and consolidating these in an Excel spreadsheet range.
+- **assist planning assessors** needing to automate the evaluation/ assessment of planning metrics from unstructured documents and consolidating these in an Excel spreadsheet range.
+- **scoring quiz answers** using AI and consolidating these in an Excel spreadsheet range. (this is provided as an example configuration as "sample-project" in the repo)
 
 This accelerator makes use of the Azure OpenAI's multimodal gpt-4o model and uses Azure AI Search to facilitate hybrid vector searches against the source documents using a retrieval Augmented Generation (RAG) pattern to perform the AI tasks.
 
 The accelerator is highly configurable and requires some configuration to adapt it for the intended use.
 	 The main steps to configure it for your use case are:
-			 1. create a folder for your project in the repo - name it something line "xyz-project"  - use a "-project" postfix in the name.
-			 2. collect the unstructured documents (pdf, docx) - and store them in a folder under the xyz-project calling it "xyz-data"
-			 3. create a folder in the xyz-project folder called  "xyz-grading" and store your target xlsx spreadsheet file there. 
-			 4. create a folder called "xzy-grading" and copy/create the grading rubric markdown (.md) or text (.txt) file there 
-		 5 . if you are using the accelerator to help you do assessments / scoring, then create a folder called "xyz-assessment" and store the files you need to have assessed there. 
-			 6. create a folder called "xyz-prompts"  and  create a "system-prompt.json" file there.  you can use the one from the "sample-project" as an example and adapt it as you see fit.
-			 7. in the "xyz-project" folder , create a file called "column_overrides.json"
+1. create a folder for your project in the repo - name it something line "xyz-project"  - use a "-project" postfix in the name.
+2. collect the unstructured documents (pdf, docx) - and store them in a folder under the xyz-project calling it "xyz-data"
+3. create a folder in the xyz-project folder called  "xyz-grading" and store your target xlsx spreadsheet file there. 
+4. create a folder called "xzy-grading" and copy/create the grading rubric markdown (.md) or text (.txt) file there 
+5. if you are using the accelerator to help you do assessments / scoring, then create a folder called "xyz-assessment" and store the files you need to have assessed there. 
+6. create a folder called "xyz-prompts"  and  create a "system-prompt.json" file there.  you can use the one from the "sample-project" as an example and adapt it as you see fit.
+7. in the "xyz-project" folder , create a file called "column_overrides.json"
 				 this file can be an empty json file ( just  containing {} )  or it can contain pairs of names of specific spreadsheet columns (downshifted case and single -spaced whitespaces)  and an override value for that column header that is more meaningful for the AI assessment.  for example in the sample_project the column "team hawks score" is overwritten with "team hawks" when it seen by the AI prompt to work better.
-				8. also in the "xyz-project" folder, create a file called "prompt_rules.json"
+8. also in the "xyz-project" folder, create a file called "prompt_rules.json"
 				 this file contains any column specific prompts that you would like the AI to respond to. Note that the column names it requires/expects are the ones after they have been overridden by the column_overrides.json  (if they have not been overridden, they must contain the exact spreadsheet column name (downshifted case and single-spaced whitespaces))   again, see the  example file in the sample-project folder.
-				9. now you create your AI Search index: first you need to ingest the documents to create your searchable knowledgebase. - to do this you need to configure your environment (.env file) to be aware of the Azure resources you have available and can use.
+9. now you create your AI Search index: first you need to ingest the documents to create your searchable knowledgebase. - to do this you need to configure your environment (.env file) to be aware of the Azure resources you have available and can use.
 					- Azure OpenAI  resource with a gpt-4o and an embedding-3-large model deployment
 					- Azure AI search resource with semantic ranker    
 					- Azure AI hub and resource with Content Understanding capability
@@ -207,7 +207,3 @@ The accelerator is highly configurable and requires some configuration to adapt 
 			 
 
 The accelerator is built using the Python language (V3.11 or later) and a number of opensource and Azure libraries.
-
-
-
-
