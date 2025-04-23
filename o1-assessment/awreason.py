@@ -303,7 +303,7 @@ def main():
         print("3. Split your images into multiple separate requests.")
         print("\nExiting program.")
         sys.exit(1)
-    elif image_count == 0:
+    elif image_count == 0 and not args.md_file:
         print("WARNING: No image files found based on the provided arguments.")
         print("Note: The O1 model can work with text-only prompts, but since this tool is designed")
         print("for visual reasoning, you might want to check your input paths.")
