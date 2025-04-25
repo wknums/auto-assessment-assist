@@ -47,6 +47,35 @@ def ensure_directory_exists(file_path):
         os.makedirs(directory)
         print(f"Created directory: {directory}")
 
+def ensure_output_path(output_path, source_path=None, alt_source_path=None):
+    """
+    Ensure all directories in the output path exist.
+    If output_path is an existing folder, compose a filename using source_path.
+    If alt_source_path is provided, use it as the base for the filename.
+    Returns the full output file path.
+    """
+    output_path = os.path.abspath(output_path)
+    if os.path.isdir(output_path):
+        # Compose filename from alt_source_path if provided, else source_path
+        base = None
+        if alt_source_path:
+            base = os.path.basename(alt_source_path)
+            base = os.path.splitext(base)[0]
+        elif source_path:
+            base = os.path.basename(source_path)
+            base = os.path.splitext(base)[0]
+        else:
+            base = "result"
+        filename = f"{base}_result.md"
+        output_file = os.path.join(output_path, filename)
+    else:
+        # If parent directory does not exist, create it
+        parent_dir = os.path.dirname(output_path)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+        output_file = output_path
+    return output_file
+
 def process_pdf_to_images(pdf_path, image_dir, join_images=None):
     """Process a PDF file to extract images and optionally join them.
     
@@ -163,13 +192,10 @@ def read_json_template(template_path):
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Chat with O1 model using text and images')
-    
-    # Create a mutually exclusive group for image source options
-    image_source_group = parser.add_mutually_exclusive_group()
-    image_source_group.add_argument('--images_folder1', type=str, help='First folder containing image files')
-    image_source_group.add_argument('--images_folder2', type=str, help='Second folder containing image files')
-    image_source_group.add_argument('--pdf_source', type=str, help='Process all PDFs in this directory')
-    image_source_group.add_argument('--pdf_file', type=str, help='Process a single PDF file')
+
+    # Accept up to two PDF files (both must be files, not directories)
+    parser.add_argument('--pdf_file1', type=str, help='First PDF file to process (all pages will be extracted as images)')
+    parser.add_argument('--pdf_file2', type=str, help='Second PDF file to process (all pages will be extracted as images)')
     
     # Image joining options for PDF processing
     parser.add_argument('--join', choices=['vertical', 'horizontal'], help='Join extracted images in pairs')
@@ -190,7 +216,10 @@ def main():
     
     # Add temp directory option for PDF processing
     parser.add_argument('--tempdir', type=str, help='Temporary directory for extracted images (default: system temp)')
-    
+    # Add image folders as optional arguments (so they always exist in args)
+    parser.add_argument('--images_folder1', type=str, default=None, help='First folder containing image files')
+    parser.add_argument('--images_folder2', type=str, default=None, help='Second folder containing image files')
+
     args = parser.parse_args()
 
     # Get prompt text either directly or from file
@@ -245,51 +274,39 @@ def main():
     # Collect images based on the source option
     folder1_images = []
     folder2_images = []
-    
-    # Process PDF files if specified
-    if args.pdf_source:
-        # Find all PDFs in the directory
-        pdf_files = find_pdfs_in_directory(args.pdf_source)
-        
-        if not pdf_files:
-            print("No PDF files found. Exiting.")
-            return
+    folder1_name = None
+    folder2_name = None
 
-        # Process the first PDF
-        if len(pdf_files) > 0:
-            pdf1_dir = process_pdf_to_images(pdf_files[0], temp_dir, args.join)
-            folder1_images = get_images_from_folder(pdf1_dir)
-            print(f"Processed first PDF: {os.path.basename(pdf_files[0])}")
-        
-        # Process the second PDF if there's more than one
-        if len(pdf_files) > 1:
-            pdf2_dir = process_pdf_to_images(pdf_files[1], temp_dir, args.join)
-            folder2_images = get_images_from_folder(pdf2_dir)
-            print(f"Processed second PDF: {os.path.basename(pdf_files[1])}")
-            
-        # Warn if there are more than 2 PDFs
-        if len(pdf_files) > 2:
-            print(f"WARNING: Found {len(pdf_files)} PDFs, but only processing the first two to avoid token limits.")
-    
-    # Process a single PDF file
-    elif args.pdf_file:
-        if not os.path.isfile(args.pdf_file):
-            print(f"Error: {args.pdf_file} is not a valid file. Exiting.")
+    # Process --pdf_file1 (if provided)
+    if args.pdf_file1:
+        if not (os.path.isfile(args.pdf_file1) and args.pdf_file1.lower().endswith('.pdf')):
+            print(f"Error: {args.pdf_file1} is not a valid PDF file. Exiting.")
             return
-            
-        pdf_dir = process_pdf_to_images(args.pdf_file, temp_dir, args.join)
-        folder1_images = get_images_from_folder(pdf_dir)
-        print(f"Processed PDF: {os.path.basename(args.pdf_file)}")
-    
-    # Use provided image folders
-    elif args.images_folder1:
+        pdf1_dir = process_pdf_to_images(args.pdf_file1, temp_dir, args.join)
+        folder1_images = get_images_from_folder(pdf1_dir)
+        folder1_name = Path(args.pdf_file1).name
+        print(f"Processed PDF from --pdf_file1: {os.path.basename(args.pdf_file1)}")
+
+    # Process --pdf_file2 (if provided)
+    if args.pdf_file2:
+        if not (os.path.isfile(args.pdf_file2) and args.pdf_file2.lower().endswith('.pdf')):
+            print(f"Error: {args.pdf_file2} is not a valid PDF file. Exiting.")
+            return
+        pdf2_dir = process_pdf_to_images(args.pdf_file2, temp_dir, args.join)
+        folder2_images = get_images_from_folder(pdf2_dir)
+        folder2_name = Path(args.pdf_file2).name
+        print(f"Processed PDF from --pdf_file2: {os.path.basename(args.pdf_file2)}")
+
+    # If image folders are provided, they override the PDFs
+    if args.images_folder1:
         folder1_images = get_images_from_folder(args.images_folder1)
+        folder1_name = Path(args.images_folder1).name
         print(f"Collected {len(folder1_images)} images from folder 1")
-    
-    elif args.images_folder2:
+    if args.images_folder2:
         folder2_images = get_images_from_folder(args.images_folder2)
+        folder2_name = Path(args.images_folder2).name
         print(f"Collected {len(folder2_images)} images from folder 2")
-    
+
     # Check the total number of images
     image_count = len(folder1_images) + len(folder2_images)
     print(f"Total image count: {image_count}")
@@ -308,7 +325,10 @@ def main():
         print("Note: The O1 model can work with text-only prompts, but since this tool is designed")
         print("for visual reasoning, you might want to check your input paths.")
 
-    load_dotenv(dotenv_path="..\.env",override=True)
+    # Cross-platform .env loading
+    dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+    dotenv_path = os.path.abspath(os.path.expanduser(dotenv_path))
+    load_dotenv(dotenv_path=dotenv_path, override=True)
 
     # Retrieve environment variables with defaults
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -340,10 +360,9 @@ def main():
     
     # Modify the prompt text if both folders have images
     if folder1_images and folder2_images:
-        folder1_name = Path(args.images_folder1 if args.images_folder1 else (args.pdf_source or args.pdf_file)).name
-        folder2_name = Path(args.images_folder2 if args.images_folder2 else args.pdf_source).name
-        
-        # Enhance the prompt to explain which images belong to which document
+        # Use detected names or fallback
+        folder1_name = folder1_name or "folder1"
+        folder2_name = folder2_name or "folder2"
         document_explanation = (
             f"\n\nIMPORTANT: You will be provided with images from two different documents."
             f"\n- The first {len(folder1_images)} images (from '{folder1_name}') belong to DOCUMENT 1."
@@ -471,10 +490,18 @@ def main():
         print(response_content[:500] + "...\n...\n..." + response_content[-500:])
     else:
         print(response_content)
-    
+
+    # Determine the output file path (fix for --output as directory)
+    # If both pdf_file1 and pdf_file2 are provided and output is a directory, use pdf_file2 for output filename
+    output_file = ensure_output_path(
+        args.output,
+        source_path=args.pdf_file1 or args.images_folder1 or args.images_folder2,
+        alt_source_path=args.pdf_file2 if (args.pdf_file1 and args.pdf_file2 and os.path.isdir(os.path.abspath(args.output))) else None
+    )
+
     # Save the response to the specified output file (as JSON if template was provided)
-    save_response_to_file(response_content, args.output, is_json=bool(json_template))
-    
+    save_response_to_file(response_content, output_file, is_json=bool(json_template))
+
     # Clean up temporary directory if we created one
     if not args.tempdir and temp_dir and os.path.exists(temp_dir):
         import shutil

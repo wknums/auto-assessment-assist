@@ -66,13 +66,14 @@ Note: The purpose of this Accelerator is NOT to hand over the grading of assignm
 
   
 
-At this stage the accelerator is expected to be deployed manually only in development mode to be executed locally on a workstation that has the vscode interactive development environment as well as git and python installed.
+At this stage the accelerator is expected to be deployed manually only in development mode to be executed locally on a workstation that has the vscode interactive development environment as well as git and python (V3.11 or 3.12) as well as Azure Developer CLI (azd) installed.
 
   
 
 clone the git repository to your local vscode environment.
 
 configure a virtual python environment for use with this project
+python -m venv .venv
 
 on Azure Portal, create an Azure AI foundry environment, a project and deploy an Azure OpenAI o1 base model.
 
@@ -82,7 +83,6 @@ create a copy of the .env_sample file and save it as .env
 
 edit the .env file:
 
-  
 
 copy the endpoint of your Azure OpenAI resource and paste it into the value for the AZURE_OPENAI_ENDPOINT field.
 
@@ -92,17 +92,19 @@ save the .env file
 
 Test that your environment is working:
 
-in the vscode environment, open a terminal and execute the following commands to activate your virtual environment and run a test:
+in the vscode environment, open a terminal and execute the following commands to activate your virtual environment log in to azure and run a test:
 
-    *.venv\scripts\activate
+    .venv\scripts\activate
     
     pip install -r requirements.txt
+
+    azd login
     
     cd o1-assessment
 
-    python awreason.py --pdf_file ".\sample_pdfs\Managing your driving and vehicle licenses in Autoria.pdf" --promptfile ".\prompts\sample_prompt.txt" --output ".\sample_grading_results"*
+    python awreason.py --pdf_file ".\sample_pdfs\Managing your driving and vehicle licenses in Autoria.pdf" --promptfile ".\prompts\sample_prompt.txt" --output ".\sample_grading_results"
 
-This should run a sample assessment against the sample pdf file provided, show the output in the terminal and the output directory used in the above command.
+This should run a sample assessment against the sample pdf file provided, show the output in the terminal and the output directory used in the above command. Note that the --output paramter expects an output filepath, but if it points to a directory, it will generate a result file with default name startng with the source file name in that folder - if the folder does not exist it will create it.
 
   
 

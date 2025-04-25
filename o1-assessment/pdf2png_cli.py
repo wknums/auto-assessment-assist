@@ -26,7 +26,7 @@ def main():
     parser.add_argument(
         "--imagedir", 
         type=str, 
-        default="./docimages", 
+        default=os.path.join(".", "docimages"), 
         help="Parent output directory for extracted images"
     )
     parser.add_argument(
@@ -43,13 +43,14 @@ def main():
     args = parser.parse_args()
     
     # Validate that pdfsource is a directory
-    pdfsource = args.pdfsource
+    pdfsource = os.path.abspath(args.pdfsource)
     if not os.path.isdir(pdfsource):
         print(f"Error: {pdfsource} is not a valid directory")
         sys.exit(1)
     
     # Ensure the parent output directory exists
-    os.makedirs(args.imagedir, exist_ok=True)
+    imagedir = os.path.abspath(args.imagedir)
+    os.makedirs(imagedir, exist_ok=True)
     
     # Process all PDF files in the directory
     pdf_files = [f for f in os.listdir(pdfsource) if f.lower().endswith('.pdf')]
@@ -68,16 +69,16 @@ def main():
         print(f"Processing {pdf_file}...")
         
         # Extract images from the PDF
-        output_dir = os.path.join(args.imagedir, pdf_name)
+        output_dir = os.path.join(imagedir, pdf_name)
         print(f"Extracting images to {output_dir}")
-        extract_pdf_pages_to_images(pdf_path, args.imagedir)
+        extract_pdf_pages_to_images(pdf_path, imagedir)
         
         # Join images if requested
         if args.joinv and args.joinh:
             print("Error: Cannot specify both --joinv and --joinh")
             sys.exit(1)
         elif args.joinv or args.joinh:
-            image_folder = os.path.join(args.imagedir, pdf_name)
+            image_folder = os.path.join(imagedir, pdf_name)
             join_direction = 'vertical' if args.joinv else 'horizontal'
             print(f"Joining images {join_direction}ly from {image_folder}")
             join_images_in_pairs(image_folder, join_direction=join_direction)
