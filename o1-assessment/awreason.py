@@ -66,7 +66,7 @@ def ensure_output_path(output_path, source_path=None, alt_source_path=None):
             base = os.path.splitext(base)[0]
         else:
             base = "result"
-        filename = f"{base}_result.md"
+        filename = f"{base}_result.html"
         output_file = os.path.join(output_path, filename)
     else:
         # If parent directory does not exist, create it

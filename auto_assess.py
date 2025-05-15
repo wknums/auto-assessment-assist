@@ -328,9 +328,9 @@ def call_openai_reasoning(prompt: str) -> str:
             {"role": "user", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}
         ],
-        max_tokens=1000,  
+        max_tokens=20000,  
         temperature=0,  
-        reasoning_effort="medium",  
+        reasoning_effort="high",  
         stop=None,  
     )
     return response.choices[0].message.content.strip()

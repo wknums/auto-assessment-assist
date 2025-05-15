@@ -90,7 +90,7 @@ save the .env file
 
   
 
-Test that your environment is working:
+Test that your environment is working (Note: this is assuming a Windows OS development environment - for Limux please adapt the paths to use forward / ):
 
 in the vscode environment, open a terminal and execute the following commands to activate your virtual environment log in to azure and run a test:
 
@@ -98,11 +98,11 @@ in the vscode environment, open a terminal and execute the following commands to
     
     pip install -r requirements.txt
 
-    azd login
+    az login
     
     cd o1-assessment
 
-    python awreason.py --pdf_file ".\sample_pdfs\Managing your driving and vehicle licenses in Autoria.pdf" --promptfile ".\prompts\sample_prompt.txt" --output ".\sample_grading_results"
+    python awreason.py --pdf_file1 ".\sample_pdfs\Managing your driving and vehicle licenses in Autoria.pdf" --promptfile ".\prompts\sample_prompt.txt" --output ".\sample_grading_results"
 
 This should run a sample assessment against the sample pdf file provided, show the output in the terminal and the output directory used in the above command. Note that the --output paramter expects an output filepath, but if it points to a directory, it will generate a result file with default name startng with the source file name in that folder - if the folder does not exist it will create it.
 
@@ -130,7 +130,7 @@ When this works, you can start customizing the accelerator for your own use.
 
   
 
-    *python awreason.py --pdf_file "path/to/sample.pdf" --join horizontal --prompt "Analyze this document" --output "results.txt"*
+    *python awreason.py --pdf_file1 "path/to/sample.pdf" --join horizontal --prompt "Analyze this document" --output "results.txt"*
 
   
 
@@ -138,7 +138,7 @@ When this works, you can start customizing the accelerator for your own use.
 
   
 
-    *python awreason.py --pdf_source "path/to/pdfs/" --join vertical --promptfile "path/to/prompt.txt" --output "results.txt"*
+    *python awreason.py --pdf_source1 "path/to/pdfs/" --join vertical --promptfile "path/to/prompt.txt" --output "results.txt"*
 
   
 
@@ -157,7 +157,7 @@ When this works, you can start customizing the accelerator for your own use.
 5. Here's how you can use the updated script with the JSON template feature using a pdf source:
  
 
-    *python awreason.py --promptfile your_prompt.txt --pdf_file "..\my_project\wcg_data\my.pdf" --jsonout_template ..\my_project\my_structured_out_template.json --output ..\my_project\o1_analysis_results.json*
+    *python awreason.py --promptfile your_prompt.txt --pdf_file1 "..\my_project\wcg_data\my.pdf" --jsonout_template ..\my_project\my_structured_out_template.json --output ..\my_project\o1_analysis_results.json*
 
   
 

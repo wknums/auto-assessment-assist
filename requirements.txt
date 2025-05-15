@@ -1,10 +1,17 @@
 openpyxl
-promptflow.client
+#promptflow.client
+promptflow
 openai
 azure-search-documents
 azure-identity
-azure-ai-openai
+#azure-ai-openai
 #azure-ai-contentunderstanding
 PyMuPDF
 Pillow
 python-dotenv
+markdown
+pyppeteer
+#weasyprint
+# NOTE: WeasyPrint requires system dependencies (Pango, Cairo, GDK-PixBuf) to be installed separately.
+# For Windows: https://weasyprint.readthedocs.io/en/stable/install.html#windows
+# For macOS/Linux: install via package manager (see docs).
