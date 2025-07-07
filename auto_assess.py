@@ -399,15 +399,28 @@ def check_file_writeable(filepath: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process APP spreadsheet using Azure OpenAI and Azure Search.")
-    parser.add_argument("--target-file", required=True, help="Path to the target Excel file.")
-    parser.add_argument("--project-dir", required=True, help="Path to the project directory containing configuration files.")
+    parser.add_argument("--target-file", required=False, help="Path to the target Excel file.")
+    parser.add_argument("--project-dir", required=False, help="Path to the project directory containing configuration files.")
     parser.add_argument("--grading-rubric", help="Optional path to a grading rubric file.")
     parser.add_argument("--sheet-name", default="Sheet1", help="Name of the sheet to process (default: Sheet1)")
     parser.add_argument("--start-row", type=int, default=2, help="Starting row number (default: 2)")
     parser.add_argument("--end-row", type=int, default=2, help="Ending row number (default: 2)")
     parser.add_argument("--start-col", type=int, default=6, help="Starting column number (default: 6)")
     parser.add_argument("--end-col", type=int, default=6, help="Ending column number (default: 6)")
+    parser.add_argument("--rag-prompt", type=str, help="If supplied, perform a RAG search and LLM call for this prompt and exit.")
     args = parser.parse_args()
+
+    # If --rag-prompt is supplied, run RAG and print result, then exit
+    if args.rag_prompt:
+        # Optionally, you may want to call init_config if your SYSTEM_PROMPT is needed
+        if args.project_dir:
+            init_config(args.project_dir)
+        context = azure_search_rag_this(args.rag_prompt)
+        prompt = f"{SYSTEM_PROMPT}\n{args.rag_prompt}\n\nContext:\n{context}"
+        result = call_openai(prompt)
+        print("\n=== RAG Result ===\n")
+        print(result)
+        sys.exit(0)
 
     target_filepath = args.target_file
     project_dir = args.project_dir

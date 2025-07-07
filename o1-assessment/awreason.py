@@ -31,6 +31,40 @@ def read_prompt_from_file(file_path):
         print(f"Error reading prompt file {file_path}: {e}")
         return None
 
+def convert_docx_to_md(docx_path, temp_dir):
+    """
+    Convert a .docx file to markdown using the doc2md.py utility.
+    Returns the path to the generated markdown file.
+    """
+    import subprocess
+    import shlex
+    import sys
+
+    # Find doc2md.py (assume it's in infra/rag relative to project root)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+    doc2md_path = os.path.join(project_root, "infra", "rag", "doc2md.py")
+    if not os.path.exists(doc2md_path):
+        raise FileNotFoundError(f"doc2md.py not found at {doc2md_path}")
+
+    # Output directory for markdown
+    output_dir = temp_dir
+    os.makedirs(output_dir, exist_ok=True)
+    # Output filename will be <docx_filename>.md
+    base_filename = os.path.basename(docx_path)
+    md_filename = os.path.join(output_dir, base_filename + ".md")
+
+    # Call doc2md.py as a subprocess
+    cmd = f"{shlex.quote(sys.executable)} {shlex.quote(doc2md_path)} {shlex.quote(docx_path)} {shlex.quote(output_dir)}"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error converting DOCX to markdown: {result.stderr}")
+        raise RuntimeError("doc2md.py failed")
+    if not os.path.exists(md_filename):
+        raise FileNotFoundError(f"Markdown file not created: {md_filename}")
+    print(f"Converted DOCX to markdown: {md_filename}")
+    return md_filename
+
 def read_markdown_file(file_path):
     """Read content from a Markdown file."""
     try:
@@ -235,12 +269,17 @@ def main():
     # If a markdown file is provided, read its content
     markdown_content = None
     if args.md_file:
-        markdown_content = read_markdown_file(args.md_file)
+        md_file_path = args.md_file
+        # If .docx, convert to markdown first
+        if md_file_path.lower().endswith(".docx"):
+            temp_dir = args.tempdir if args.tempdir else tempfile.mkdtemp()
+            md_file_path = convert_docx_to_md(md_file_path, temp_dir)
+        markdown_content = read_markdown_file(md_file_path)
         if not markdown_content:
             print("Failed to read Markdown file. Exiting.")
             return
-        print(f"Loaded Markdown content from: {args.md_file}")
-        
+        print(f"Loaded Markdown content from: {md_file_path}")
+
         # If we also have a prompt, combine them
         if prompt_text:
             prompt_text = f"{prompt_text}\n\nHere is additional context from the Markdown file:\n\n{markdown_content}"

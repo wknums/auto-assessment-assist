@@ -119,7 +119,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "source_doc",
-        help="The file path to the source document (e.g. .pdf or .docx) to process."
+        help="The file path to the source document (e.g. .pdf, .docx, or .md) to process."
     )
     parser.add_argument(
         "target_directory",
@@ -136,5 +136,28 @@ if __name__ == "__main__":
     base_filename = os.path.basename(args.source_doc)
     markdown_output = os.path.join(args.target_directory, base_filename + ".md")
 
-    # Call the extractor function with provided arguments
-    extract_md_from_doc(args.source_doc, markdown_output)
+    # If the input is already a markdown file, just copy it
+    if args.source_doc.lower().endswith(".md"):
+        import shutil
+        shutil.copy(args.source_doc, markdown_output)
+        print(f"Copied markdown file to '{markdown_output}'")
+    # If the input is a .docx file, convert it to markdown using python-docx and markdownify
+    elif args.source_doc.lower().endswith(".docx"):
+        try:
+            from docx import Document
+            from markdownify import markdownify as md
+        except ImportError:
+            print("Please install python-docx and markdownify: pip install python-docx markdownify")
+            sys.exit(1)
+        doc = Document(args.source_doc)
+        full_text = []
+        for para in doc.paragraphs:
+            full_text.append(para.text)
+        doc_text = "\n".join(full_text)
+        md_text = md(doc_text)
+        with open(markdown_output, "w", encoding="utf-8") as f:
+            f.write(md_text)
+        print(f"Converted DOCX to markdown and saved to '{markdown_output}'")
+    else:
+        # Default: use Azure Content Understanding for .pdf and other supported formats
+        extract_md_from_doc(args.source_doc, markdown_output)

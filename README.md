@@ -1,4 +1,3 @@
-
 ## Assess With Reasoning (AWReason)
 
 is a sample AI accelerator to assist educators to ease their workload related to fairly and consistently grading and assessing assignments of their learners.
@@ -73,7 +72,7 @@ At this stage the accelerator is expected to be deployed manually only in develo
 clone the git repository to your local vscode environment.
 
 configure a virtual python environment for use with this project
-python -m venv .venv
+    python -m venv .venv
 
 on Azure Portal, create an Azure AI foundry environment, a project and deploy an Azure OpenAI o1 base model.
 
@@ -90,19 +89,25 @@ save the .env file
 
   
 
-Test that your environment is working (Note: this is assuming a Windows OS development environment - for Limux please adapt the paths to use forward / ):
+Test that your environment is working (Note: this is assuming a Windows OS development environment - for Linux please adapt the paths to use forward / ):
 
 in the vscode environment, open a terminal and execute the following commands to activate your virtual environment log in to azure and run a test:
 
     .venv\scripts\activate
+
+    Linux: source .venv/bin/activate
     
     pip install -r requirements.txt
 
     az login
+    (or azd auth login)
     
     cd o1-assessment
 
     python awreason.py --pdf_file1 ".\sample_pdfs\Managing your driving and vehicle licenses in Autoria.pdf" --promptfile ".\prompts\sample_prompt.txt" --output ".\sample_grading_results"
+
+
+    linux: python awreason.py --pdf_file1 "./sample_pdfs/Managing your driving and vehicle licenses in Autoria.pdf" --promptfile "./prompts/sample_prompt.txt" --output "./sample_grading_results"
 
 This should run a sample assessment against the sample pdf file provided, show the output in the terminal and the output directory used in the above command. Note that the --output paramter expects an output filepath, but if it points to a directory, it will generate a result file with default name startng with the source file name in that folder - if the folder does not exist it will create it.
 
@@ -209,3 +214,238 @@ The accelerator is highly configurable and requires some configuration to adapt 
 			 
 
 The accelerator is built using the Python language (V3.11 or later) and a number of opensource and Azure libraries.
+
+## Composite Image Creator
+
+A powerful utility for creating intelligent composite images from multiple input images. The tool automatically arranges images based on their orientation (portrait, landscape, or square) to create the most square-like composite possible.
+
+### Features
+
+#### **Smart Image Arrangement**
+- **Automatic orientation detection**: Identifies portrait, landscape, and square images
+- **Optimal arrangement algorithms**: 
+  - 4 landscape images: Creates vertical pairs, then joins horizontally
+  - 4 portrait images: Creates horizontal pairs, then joins vertically
+  - Mixed orientations: Intelligently combines for best square approximation
+  - Fallback 2×2 grid: For other combinations
+
+#### **File Size Optimization**
+- **Compression options**: PNG (level 6) and JPEG (quality 85) with optimization
+- **Downscaling capability**: Reduce image size from 25% to 100% of original
+- **Real-time size feedback**: Shows estimated file size reduction
+- **Cross-platform compatibility**: Works on Windows and Linux
+
+#### **Multiple Interfaces**
+- **Command-line utility**: For automation and scripting
+- **Streamlit web app**: User-friendly browser interface
+- **Batch processing support**: Process multiple image sets
+
+### Installation
+
+The composite image creator requires additional dependencies:
+
+```bash
+pip install PyPDF2 python-docx streamlit
+```
+
+Or install all project dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Usage
+
+#### **Command Line Interface**
+
+**Basic Usage:**
+```bash
+cd o1-assessment
+python composite_image_creator.py image1.png image2.jpg image3.png image4.jpg output.png
+```
+
+**With Downscaling:**
+```bash
+# 50% size (much smaller file)
+python composite_image_creator.py img1.jpg img2.jpg img3.jpg img4.jpg output.png --downscale 0.5
+
+# 25% size (very small file)  
+python composite_image_creator.py img1.jpg img2.jpg img3.jpg img4.jpg output.png --downscale 0.25
+```
+
+**Help:**
+```bash
+python composite_image_creator.py --help
+```
+
+#### **Streamlit Web Application**
+
+**Start the App:**
+```bash
+cd o1-assessment
+streamlit run composite_image_app.py
+```
+
+Or use the launcher:
+```bash
+cd o1-assessment
+python run_composite_app.py
+```
+
+**Using the Web Interface:**
+1. **Upload 4 images** (PNG, JPG, or JPEG format)
+2. **Preview images** and see orientation analysis
+3. **Adjust downscale factor** using the slider (optional)
+4. **Generate composite** by clicking the create button
+5. **Download result** with one click
+
+#### **Test Scripts**
+
+**Test with Sample Images:**
+```bash
+cd o1-assessment
+python test_composite_creator.py
+```
+
+**Test 4 Landscape Images:**
+```bash
+cd o1-assessment
+python test_landscape_composite.py
+```
+
+### Configuration Options
+
+#### **Downscale Factors**
+- **1.0**: Original size (no downscaling)
+- **0.75**: 75% of original size (~44% smaller file)
+- **0.5**: 50% of original size (~75% smaller file)
+- **0.25**: 25% of original size (~94% smaller file)
+
+#### **Supported Formats**
+- **Input**: PNG, JPG, JPEG
+- **Output**: PNG (with compression) or JPEG (quality 85)
+
+#### **Arrangement Strategies**
+
+**4 Landscape Images (Optimal):**
+- Images 1&2 joined vertically (left pair)
+- Images 3&4 joined vertically (right pair)  
+- Two pairs joined horizontally for square result
+
+**4 Portrait Images (Optimal):**
+- Images 1&2 joined horizontally (top pair)
+- Images 3&4 joined horizontally (bottom pair)
+- Two pairs joined vertically for square result
+
+**Mixed Orientations:**
+- Portrait images joined horizontally
+- Landscape images joined vertically
+- Results combined for optimal square ratio
+
+**Fallback (2×2 Grid):**
+- Used for mixed orientations or when optimal strategies don't apply
+- Standard grid arrangement
+
+### File Structure
+
+```
+o1-assessment/
+├── composite_image_creator.py     # Core utility script
+├── composite_image_app.py         # Streamlit web application  
+├── run_composite_app.py          # App launcher script
+├── test_composite_creator.py     # Test script with sample images
+├── test_landscape_composite.py   # Test script for landscape images
+└── pdf2png_utils.py              # Image processing utilities (reused)
+```
+
+### Performance Tips
+
+#### **File Size Optimization**
+- Use **downscaling** for large images to significantly reduce file size
+- **PNG format** works best for images with few colors or transparency
+- **JPEG format** works best for photographs with many colors
+
+#### **Quality vs Size Balance**
+- **No downscaling + PNG compression**: Best quality, moderate file size
+- **50% downscaling**: Good balance of quality and file size  
+- **25% downscaling**: Smallest files, acceptable quality for web/email
+
+#### **Arrangement Quality**
+- **Mix orientations**: 2 portrait + 2 landscape gives best square results
+- **Consistent orientations**: 4 landscape or 4 portrait use optimal strategies
+- **Image dimensions**: Similar-sized images create more balanced composites
+
+### Troubleshooting
+
+#### **Common Issues**
+
+**Large File Sizes:**
+- Use the `--downscale` option (CLI) or downscale slider (web app)
+- Consider JPEG output for photographs
+- Check if input images are unnecessarily large
+
+**Poor Arrangement:**
+- Ensure exactly 4 images are provided
+- Mix portrait and landscape images for best results
+- Check image orientation detection in the web app preview
+
+**Streamlit Errors:**
+- Ensure all dependencies are installed: `pip install streamlit`
+- Check that you're in the correct directory: `cd o1-assessment`
+- Verify Python environment is activated
+
+#### **Error Messages**
+
+**"Exactly 4 images are required":**
+- Provide exactly 4 image files
+- Check file extensions are supported (PNG, JPG, JPEG)
+
+**"Downscale factor must be between 0 and 1":**
+- Use values between 0.1 and 1.0 for downscaling
+- 1.0 = original size, 0.5 = 50% size
+
+### Examples
+
+#### **Example 1: Academic Document Assembly**
+```bash
+# Combine 4 scanned document pages into one composite
+python composite_image_creator.py page1.png page2.png page3.png page4.png document.png --downscale 0.75
+```
+
+#### **Example 2: Photo Collage Creation**
+```bash
+# Create a photo collage with size optimization
+python composite_image_creator.py photo1.jpg photo2.jpg photo3.jpg photo4.jpg collage.jpg --downscale 0.5
+```
+
+#### **Example 3: Web Interface for Batch Processing**
+```bash
+# Start web app for easy batch processing
+streamlit run composite_image_app.py
+# Open browser to http://localhost:8501
+# Upload images, adjust settings, download results
+```
+
+#### **Example 4: Automated Workflow**
+```bash
+# Process multiple sets in a script
+for i in {1..10}; do
+    python composite_image_creator.py "set${i}_img1.png" "set${i}_img2.png" "set${i}_img3.png" "set${i}_img4.png" "composite_${i}.png" --downscale 0.6
+done
+```
+
+### Advanced Features
+
+#### **Integration with PDF Processing**
+The composite image creator works well with the existing PDF processing utilities:
+
+```bash
+# Extract images from PDF, then create composite
+python pdf2png_cli.py source_pdfs/ --imagedir extracted_images/
+python composite_image_creator.py extracted_images/doc1/1.png extracted_images/doc1/2.png extracted_images/doc1/3.png extracted_images/doc1/4.png composite.png
+```
+
+#### **Custom Image Processing Pipeline**
+The utility can be integrated into larger document processing workflows for assessment and analysis tasks.
+
+---
