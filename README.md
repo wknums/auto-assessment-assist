@@ -109,7 +109,7 @@ in the vscode environment, open a terminal and execute the following commands to
 
     linux: python awreason.py --pdf_file1 "./sample_pdfs/Managing your driving and vehicle licenses in Autoria.pdf" --promptfile "./prompts/sample_prompt.txt" --output "./sample_grading_results"
 
-This should run a sample assessment against the sample pdf file provided, show the output in the terminal and the output directory used in the above command. Note that the --output paramter expects an output filepath, but if it points to a directory, it will generate a result file with default name startng with the source file name in that folder - if the folder does not exist it will create it.
+This should run a sample assessment against the sample pdf file provided, show the output in the terminal and the output directory used in the above command. Note that the --output parameter expects an output filepath, but if it points to a directory, it will generate a result file with default name startng with the source file name in that folder - if the folder does not exist it will create it.
 
   
 
@@ -174,9 +174,19 @@ When this works, you can start customizing the accelerator for your own use.
 
   
 
+7. Here's how you can use the updated script with a DOCX file source (automatically extracts markdown):
+
+  
+
+    *python awreason.py --promptfile your_prompt.txt --md_file "..\my_project\wcg_data\my_document.docx" --jsonout_template ..\my_project\my_structured_out_template.json --output ..\my_project\o1_analysis_results.json*
+
+  
+
 ### Limitations:
 
-Due to existing limits with the o1 model, the maximum number of images that the model can analyze in one request is 50. This repo concatenates 2 consecutive page images into a single image without noticeable loss in vision quality and therefore we can process pdfs with up to 100 pages. (combined total if in 2 documents with even page numbers as remainder pages are not combined)
+Due to existing limits with the o1 model, the maximum number of images that the model can analyze in one request is 50. This repo can concatenate 2 consecutive page images into a single images without noticeable loss in vision quality and therefore we can process pdfs with up to 100 pages. (combined total of all provided documents with even page numbers as remainder pages are not combined)
+
+Note: If you have a pdf that exceed this limit, but have access to the .docx source of that pdf, you can provide the docx file (using the --md_file parameter) instead, as awreason.py will extract the markdown from the docx file instead of processing the page images and thereby allow processing of much larger input files.
 
 ## AutoAssess with AI
 

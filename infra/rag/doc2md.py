@@ -6,19 +6,26 @@ import uuid
 from pathlib import Path
 from loguru import logger
 from datetime import datetime
-#from dotenv import find_dotenv, load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
 timestamp = datetime.now().strftime("%Y-%m-%d")
 #logger.remove()  # To not show the logs in the console
 logger.add(f"../../logs/logs_{timestamp}.log", rotation="23:59", compression="zip")
 
-config = json.load(open("../../config.json"))
+#config = json.load(open("../../config.json"))  #removed and replaced with .env
 
+# Get the script directory and find the project root
+script_dir = Path(__file__).parent
+project_root = script_dir.parent.parent  # Go up two levels to reach project root
+env_file = project_root / ".env"
+
+load_dotenv(env_file, override=True)  # Load environment variables from .env file at the project root folder
 # Azure AI Search Config
-AZURE_AI_ENDPOINT = config["azure_ai_endpoint"]
-AZURE_AI_API_VERSION = config.get("azure_ai_api_version", "2024-12-01-preview")
-#load_dotenv(find_dotenv())
+#AZURE_AI_ENDPOINT = config["azure_ai_endpoint"]
+AZURE_AI_ENDPOINT = os.getenv("AZURE_AI_ENDPOINT")
+print(f"Using Azure AI endpoint: {AZURE_AI_ENDPOINT} \n")
+AZURE_AI_API_VERSION = os.getenv("AZURE_AI_API_VERSION", "2024-12-01-preview")
 logging.basicConfig(level=logging.INFO)
 
 #AZURE_AI_ENDPOINT = os.getenv("AZURE_AI_ENDPOINT")
@@ -33,6 +40,8 @@ from python.content_understanding_client import AzureContentUnderstandingClient
 
 credential = DefaultAzureCredential()
 token_provider = get_bearer_token_provider(credential, "https://cognitiveservices.azure.com/.default")
+
+print(f"Using Azure AI endpoint (2): {AZURE_AI_ENDPOINT} \n")
 
 client = AzureContentUnderstandingClient(
     endpoint=AZURE_AI_ENDPOINT,

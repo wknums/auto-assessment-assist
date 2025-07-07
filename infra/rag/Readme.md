@@ -241,3 +241,230 @@ python rag_this.py "./md_files/" --keep_index
 5. **Testing**: Test with sample documents before processing large batches
 
 ---
+
+## Token Counter Utility (token_counter.py)
+
+The `token_counter.py` utility provides accurate token estimation for markdown files that will be used as input to OpenAI models, particularly optimized for o1 models. This tool helps you understand token consumption before making API calls, enabling better cost estimation and prompt optimization.
+
+### Features
+
+#### **Accurate Token Counting**
+- **OpenAI-compatible tokenization**: Uses `tiktoken` library for precise token counts
+- **Model-specific encoding**: Supports different tokenization schemes (o1-preview, o1-mini, gpt-4, etc.)
+- **Markdown handling**: Processes markdown syntax and formatting tokens correctly
+- **File size estimation**: Provides both token count and approximate API cost
+
+#### **Multiple Output Formats**
+- **Detailed analysis**: Character count, token count, and cost estimation
+- **Batch processing**: Handle multiple files in a single operation
+- **Summary statistics**: Overall totals for batch operations
+- **Export options**: JSON output for integration with other tools
+
+### Installation Requirements
+
+Install the required dependencies:
+
+```bash
+pip install tiktoken
+```
+
+### Usage
+
+#### **Basic Syntax**
+```bash
+python token_counter.py <markdown_file> [--model MODEL_NAME] [--cost-per-token COST] [--json]
+```
+
+#### **Parameters**
+- `markdown_file`: Path to the markdown file to analyze
+- `--model`: OpenAI model name for tokenization (default: "o1-preview")
+- `--cost-per-token`: Cost per token in USD (default: 0.000015 for o1-preview)
+- `--json`: Output results in JSON format
+
+### Usage Examples for o1 Models
+
+#### **Example 1: Basic Token Count for o1-preview**
+```bash
+python token_counter.py "./markdown_output/research_paper.pdf.md"
+```
+**Output:**
+```
+Token Analysis for research_paper.pdf.md
+========================================
+Characters: 15,234
+Tokens (o1-preview): 3,891
+Estimated Cost: $0.058
+```
+
+#### **Example 2: Token Count for o1-mini**
+```bash
+python token_counter.py "./converted/annual_report.docx.md" --model "o1-mini" --cost-per-token 0.000003
+```
+**Output:**
+```
+Token Analysis for annual_report.docx.md
+========================================
+Characters: 8,567
+Tokens (o1-mini): 2,234
+Estimated Cost: $0.007
+```
+
+#### **Example 3: Batch Analysis with JSON Output**
+```bash
+python token_counter.py "./markdown_files/*.md" --model "o1-preview" --json > token_analysis.json
+```
+**JSON Output:**
+```json
+{
+  "files": [
+    {
+      "filename": "document1.md",
+      "characters": 12345,
+      "tokens": 3200,
+      "estimated_cost": 0.048
+    },
+    {
+      "filename": "document2.md", 
+      "characters": 8900,
+      "tokens": 2150,
+      "estimated_cost": 0.032
+    }
+  ],
+  "summary": {
+    "total_files": 2,
+    "total_characters": 21245,
+    "total_tokens": 5350,
+    "total_estimated_cost": 0.080
+  }
+}
+```
+
+#### **Example 4: Pre-prompt Analysis for o1 Context Window**
+```bash
+# Check if your converted document fits within o1's context limits
+python token_counter.py "./large_document.pdf.md" --model "o1-preview"
+```
+**Use Case**: o1-preview has a 128K token context window. This helps ensure your document won't exceed limits.
+
+#### **Example 5: Cost Estimation for RAG Pipeline**
+```bash
+# Estimate costs before processing multiple documents
+for file in ./converted_docs/*.md; do
+    python token_counter.py "$file" --model "o1-mini" --cost-per-token 0.000003
+done
+```
+
+### Model-Specific Token Costs (2024 Rates)
+
+#### **o1 Models**
+- **o1-preview**: $0.015 per 1K input tokens
+- **o1-mini**: $0.003 per 1K input tokens
+
+#### **Usage Example with Current Rates**
+```bash
+# For o1-preview (production use)
+python token_counter.py "assessment_content.md" --model "o1-preview" --cost-per-token 0.000015
+
+# For o1-mini (cost-effective testing)
+python token_counter.py "assessment_content.md" --model "o1-mini" --cost-per-token 0.000003
+```
+
+### Integration with Assessment Workflows
+
+#### **Pre-Assessment Token Planning**
+```bash
+# Step 1: Convert assessment document
+python doc2md.py "student_submission.pdf" "./temp_md/"
+
+# Step 2: Check token usage before processing
+python token_counter.py "./temp_md/student_submission.pdf.md" --model "o1-preview"
+
+# Step 3: Proceed with assessment if within budget
+if [ tokens -lt 50000 ]; then
+    python auto_assess.py "./temp_md/student_submission.pdf.md"
+fi
+```
+
+#### **Batch Assessment Cost Estimation**
+```bash
+#!/bin/bash
+# Estimate costs for processing multiple student submissions
+total_cost=0
+for submission in ./submissions/*.pdf; do
+    # Convert to markdown
+    python doc2md.py "$submission" "./temp_md/"
+    
+    # Count tokens and get cost
+    markdown_file="./temp_md/$(basename "$submission").md"
+    cost=$(python token_counter.py "$markdown_file" --model "o1-mini" --json | jq '.estimated_cost')
+    total_cost=$(echo "$total_cost + $cost" | bc -l)
+    
+    echo "Submission: $submission - Estimated cost: \$$cost"
+done
+echo "Total estimated cost: \$$total_cost"
+```
+
+### Advanced Features
+
+#### **Context Window Validation**
+```python
+# Built-in context window limits
+MODEL_LIMITS = {
+    "o1-preview": 128000,
+    "o1-mini": 128000,
+    "gpt-4": 8192,
+    "gpt-4-32k": 32768
+}
+```
+
+#### **Markdown-Specific Token Handling**
+- Handles markdown formatting tokens (headers, links, code blocks)
+- Accounts for syntax highlighting in code sections
+- Processes table formatting efficiently
+- Manages image reference tokens
+
+### Troubleshooting
+
+#### **Common Issues**
+
+**Large File Warnings:**
+```bash
+# Files approaching context limits will show warnings
+Warning: Token count (125,000) approaching o1-preview limit (128,000)
+```
+
+**Model Not Found:**
+```bash
+# Ensure model name is correctly specified
+python token_counter.py "file.md" --model "o1-preview"  # Correct
+python token_counter.py "file.md" --model "o1_preview"  # Incorrect
+```
+
+**Encoding Errors:**
+```bash
+# Ensure file is UTF-8 encoded
+file -bi filename.md  # Check encoding
+iconv -f ISO-8859-1 -t UTF-8 filename.md > filename_utf8.md  # Convert if needed
+```
+
+### Performance Considerations
+
+#### **Processing Speed**
+- **Small files (<10KB)**: Instant processing
+- **Medium files (10KB-1MB)**: Under 1 second
+- **Large files (>1MB)**: May take several seconds
+
+#### **Memory Usage**
+- Loads entire file into memory for tokenization
+- Memory usage approximately 2-3x file size
+- For very large files, consider splitting before analysis
+
+### Best Practices for o1 Integration
+
+1. **Token Budgeting**: Always check token counts before API calls
+2. **Model Selection**: Use o1-mini for testing, o1-preview for production
+3. **Batch Processing**: Sum token counts across multiple documents
+4. **Context Management**: Keep total tokens well below model limits (aim for 80% of limit)
+5. **Cost Monitoring**: Track cumulative costs across assessment batches
+
+---

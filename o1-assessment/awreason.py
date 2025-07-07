@@ -33,37 +33,43 @@ def read_prompt_from_file(file_path):
 
 def convert_docx_to_md(docx_path, temp_dir):
     """
-    Convert a .docx file to markdown using the doc2md.py utility.
+    Convert a .docx file to markdown using python-docx and markdownify libraries.
     Returns the path to the generated markdown file.
     """
-    import subprocess
-    import shlex
-    import sys
-
-    # Find doc2md.py (assume it's in infra/rag relative to project root)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
-    doc2md_path = os.path.join(project_root, "infra", "rag", "doc2md.py")
-    if not os.path.exists(doc2md_path):
-        raise FileNotFoundError(f"doc2md.py not found at {doc2md_path}")
+    try:
+        from docx import Document
+        from markdownify import markdownify as md
+    except ImportError:
+        print("Please install python-docx and markdownify: pip install python-docx markdownify")
+        raise ImportError("Required libraries not found")
 
     # Output directory for markdown
     output_dir = temp_dir
     os.makedirs(output_dir, exist_ok=True)
+    
     # Output filename will be <docx_filename>.md
     base_filename = os.path.basename(docx_path)
     md_filename = os.path.join(output_dir, base_filename + ".md")
 
-    # Call doc2md.py as a subprocess
-    cmd = f"{shlex.quote(sys.executable)} {shlex.quote(doc2md_path)} {shlex.quote(docx_path)} {shlex.quote(output_dir)}"
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Error converting DOCX to markdown: {result.stderr}")
-        raise RuntimeError("doc2md.py failed")
-    if not os.path.exists(md_filename):
-        raise FileNotFoundError(f"Markdown file not created: {md_filename}")
-    print(f"Converted DOCX to markdown: {md_filename}")
-    return md_filename
+    try:
+        # Convert DOCX to markdown directly
+        print(f"Converting DOCX to markdown: {docx_path}")
+        doc = Document(docx_path)
+        full_text = []
+        for para in doc.paragraphs:
+            full_text.append(para.text)
+        doc_text = "\n".join(full_text)
+        md_text = md(doc_text)
+        
+        with open(md_filename, "w", encoding="utf-8") as f:
+            f.write(md_text)
+            
+        print(f"Successfully converted DOCX to markdown: {md_filename}")
+        return md_filename
+        
+    except Exception as e:
+        print(f"Error converting DOCX to markdown: {e}")
+        raise RuntimeError("DOCX conversion failed")
 
 def read_markdown_file(file_path):
     """Read content from a Markdown file."""
