@@ -223,6 +223,8 @@ The accelerator is highly configurable and requires some configuration to adapt 
 
 We have included a Streamlit-based frontend for the AWReason AI assessment tool. It provides a user-friendly web interface to upload documents and prompt files, configure assessment options, and view results.
 
+![AWReason Streamlit Frontend](o1-assessment/frontend/static/screenshot1.png)
+
 ## Features
 
 - Easy-to-use web interface for file uploads
