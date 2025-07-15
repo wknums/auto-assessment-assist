@@ -219,11 +219,74 @@ The accelerator is highly configurable and requires some configuration to adapt 
 					- once the environment is set up, you can:
 					   adapt the "`sample_project\command_eg\build_knowledgebase.cmd`" to point to each your documents to be ingested.
 						
+# AWReason Streamlit Frontend
+
+We have included a Streamlit-based frontend for the AWReason AI assessment tool. It provides a user-friendly web interface to upload documents and prompt files, configure assessment options, and view results.
+
+## Features
+
+- Easy-to-use web interface for file uploads
+- Support for uploading prompt files and documents to assess
+- Configuration options for image joining and structured output
+- Real-time output display during assessment
+- Result preview and download capabilities
+
+## Usage
+
+To run the Streamlit frontend:
+
+```bash
+cd o1-assessment/frontend
+streamlit run assess-ux.py
+```
+
+Or from the repository root:
+
+```bash
+streamlit run o1-assessment/frontend/assess-ux.py
+```
+
+## Requirements
+
+The frontend requires the following dependencies:
+- streamlit
+- All dependencies required by awreason.py
+
+These should be installed if you've already run:
+```bash
+pip install -r requirements.txt
+```
+
+## Configuration
+
+The application will automatically detect the path to the AWReason backend script. No additional configuration is needed.
+
+## Workflow
+
+1. **Upload Assessment Prompt**: Upload a text file containing the assessment instructions.
+2. **Upload Documents**: Upload one or two PDF files to be assessed.
+3. **Configure Options**: Set optional parameters like image joining and output formatting.
+4. **Run Assessment**: Click the "Run Assessment" button to start the process.
+5. **View Results**: Once complete, view the results directly in the app and download them.
+
+## Advanced Options
+
+- **Join Images**: Combine consecutive PDF pages into single images (horizontal or vertical)
+- **JSON Template**: Provide a structured output template for the assessment
+
+## Limitations
+
+The frontend inherits the same limitations as the AWReason backend:
+- Maximum of 50 images per assessment due to model limitations
+- Limited to 2 PDF files per assessment
 			 
 			 
 			 
 
 The accelerator is built using the Python language (V3.11 or later) and a number of opensource and Azure libraries.
+
+
+
 
 ## Composite Image Creator
 

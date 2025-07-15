@@ -11,6 +11,7 @@ Pillow
 python-dotenv
 markdown
 pyppeteer
+streamlit 
 #weasyprint
 # NOTE: WeasyPrint requires system dependencies (Pango, Cairo, GDK-PixBuf) to be installed separately.
 # For Windows: https://weasyprint.readthedocs.io/en/stable/install.html#windows
