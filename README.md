@@ -102,7 +102,7 @@ in the vscode environment, open a terminal and execute the following commands to
     az login
     (or azd auth login)
     
-    cd o1-assessment
+    cccccc
 
     python awreason.py --pdf_file1 ".\sample_pdfs\Managing your driving and vehicle licenses in Autoria.pdf" --promptfile ".\prompts\sample_prompt.txt" --output ".\sample_grading_results"
 

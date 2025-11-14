@@ -12,6 +12,9 @@ python-dotenv
 markdown
 pyppeteer
 streamlit 
+# Added for DOCX -> Markdown conversion when using context .docx files
+python-docx
+markdownify
 #weasyprint
 # NOTE: WeasyPrint requires system dependencies (Pango, Cairo, GDK-PixBuf) to be installed separately.
 # For Windows: https://weasyprint.readthedocs.io/en/stable/install.html#windows
