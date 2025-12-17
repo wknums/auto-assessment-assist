@@ -465,7 +465,7 @@ def main():
         "model": deployment,
         "messages": messages,
         #"temperature": 0.2,  # Lower temperature for more deterministic results - not supported by O1
-        "seed": 31457  # For more consistent results across runs
+        # Note: seed parameter is not supported by o1 models with vision (images)
     }
     
     # Check API version and adjust parameters accordingly

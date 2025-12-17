@@ -225,6 +225,42 @@ We have included a Streamlit-based frontend for the AWReason AI assessment tool.
 
 ![AWReason Streamlit Frontend](o1-assessment/frontend/static/screenshot1.png)
 
+## Quick Start
+
+The easiest way to launch the frontend is using the provided launcher scripts:
+
+**Windows (PowerShell):**
+```powershell
+.\run_awreason_ux.ps1
+```
+
+**Linux/Mac (Bash):**
+```bash
+chmod +x run_awreason_ux.sh  # Make executable (first time only)
+./run_awreason_ux.sh
+```
+
+These scripts will automatically:
+- Activate your virtual environment (if present)
+- Check for Python and Streamlit
+- Install Streamlit if needed
+- Launch the application in your browser
+
+## Manual Launch
+
+Alternatively, you can launch the frontend manually:
+
+```bash
+cd o1-assessment/frontend
+streamlit run assess-ux.py
+```
+
+Or from the repository root:
+
+```bash
+streamlit run o1-assessment/frontend/assess-ux.py
+```
+
 ## Features
 
 - Easy-to-use web interface for file uploads
@@ -276,11 +312,46 @@ The application will automatically detect the path to the AWReason backend scrip
 - **Join Images**: Combine consecutive PDF pages into single images (horizontal or vertical)
 - **JSON Template**: Provide a structured output template for the assessment
 
+## Batch Processing (Beta) ⚠️
+
+**Note: This feature is currently in Beta and has not been fully tested. Please use with caution and verify results.**
+
+The frontend now includes a batch processing capability that allows you to process multiple documents at once:
+
+### Features:
+- **Process multiple files**: Upload and process multiple .docx or .pdf files in a single batch
+- **Common prompt and template**: Use the same assessment prompt for all documents
+- **Optional JSON template**: Generate structured JSON output or standard HTML reports
+- **Mixed file types**: Process both .docx and .pdf files in the same batch
+- **Real-time progress**: Track processing status for each file
+- **Individual results**: Each file generates its own output file with matching filename
+
+### Usage:
+1. Navigate to the **"Batch Processing"** tab
+2. Upload your assessment prompt (with live editing capability)
+3. (Optional) Upload a JSON template for structured output
+4. Upload multiple .docx or .pdf files
+5. Set the output directory
+6. Click **"Run Batch Processing"**
+7. Monitor progress and view results summary
+
+### Output:
+- **For .docx files**: Creates markdown intermediate file + analysis output
+- **For .pdf files**: Processes directly to analysis output
+- **With JSON template**: Generates `[filename]-analysis.json`
+- **Without JSON template**: Generates `[filename]-analysis.html`
+
+### Limitations:
+- All documents in a batch use the same prompt and template
+- Each file is processed sequentially (not in parallel)
+- Inherits single-file assessment limitations (50 image limit, etc.)
+- Beta status: Edge cases and error handling may need improvement
+
 ## Limitations
 
 The frontend inherits the same limitations as the AWReason backend:
 - Maximum of 50 images per assessment due to model limitations
-- Limited to 2 PDF files per assessment
+- Limited to 2 PDF files per single assessment (batch mode processes files individually)
 			 
 			 
 			 

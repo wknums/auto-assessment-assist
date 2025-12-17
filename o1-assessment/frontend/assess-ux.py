@@ -575,7 +575,7 @@ def main():
         """, unsafe_allow_html=True)
     
     # Create tabs for different sections
-    tab1, tab2, tab3, tab4 = st.tabs(["Assessment Setup", "Advanced Options", "Chat Assistant", "Help & Info"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Assessment Setup", "Advanced Options", "Batch Processing (Beta) ⚠️", "Chat Assistant", "Help & Info"])
     
     with tab1:
         st.markdown("<h2 class='section-header'>1. Upload Assessment Prompt</h2>", unsafe_allow_html=True)
@@ -752,6 +752,346 @@ def main():
         )
     
     with tab3:
+        st.markdown("<h2 class='section-header'>Batch Document Processing (Beta)</h2>", unsafe_allow_html=True)
+        st.warning("⚠️ **Beta Feature**: This batch processing capability has not been fully tested. Please verify results carefully.")
+        st.info("Upload multiple .docx or .pdf files and process them all at once using a common prompt and optional JSON template.")
+        
+        # Batch prompt file
+        st.markdown("### 1. Upload Assessment Prompt")
+        batch_prompt_file = st.file_uploader(
+            "Upload prompt file for batch processing (.txt, .md)", 
+            type=["txt", "md"],
+            help="This prompt will be used for all documents in the batch.",
+            key="batch_prompt"
+        )
+        
+        # Display and allow editing of batch prompt
+        if batch_prompt_file:
+            try:
+                batch_prompt_content = batch_prompt_file.getvalue().decode('utf-8')
+                
+                if 'batch_original_prompt' not in st.session_state or st.session_state.get('last_batch_prompt_file') != batch_prompt_file.name:
+                    st.session_state.batch_original_prompt = batch_prompt_content
+                    st.session_state.last_batch_prompt_file = batch_prompt_file.name
+                
+                st.markdown("#### Review and Edit Batch Prompt")
+                batch_edited_prompt = st.text_area(
+                    "Batch Prompt Content (editable)",
+                    value=st.session_state.batch_original_prompt,
+                    height=250,
+                    key="batch_prompt_editor"
+                )
+                
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col1:
+                    if batch_edited_prompt != st.session_state.batch_original_prompt:
+                        st.caption("✏️ Prompt has been modified")
+                with col2:
+                    st.caption(f"📊 {len(batch_edited_prompt)} characters")
+                with col3:
+                    if st.button("↺ Reset", key="reset_batch_prompt"):
+                        st.session_state.batch_original_prompt = batch_prompt_content
+                        st.rerun()
+                
+                st.session_state.batch_edited_prompt = batch_edited_prompt
+                
+            except Exception as e:
+                st.error(f"Error reading batch prompt file: {e}")
+                st.session_state.batch_edited_prompt = None
+        else:
+            st.session_state.batch_edited_prompt = None
+        
+        # JSON template (optional)
+        st.markdown("### 2. Upload JSON Template (Optional)")
+        batch_json_template = st.file_uploader(
+            "Upload common JSON template (.json)", 
+            type=["json"],
+            help="Optional: This template will be used for all documents in the batch. If not provided, output will be in HTML format.",
+            key="batch_json_template"
+        )
+        
+        # Upload multiple documents
+        st.markdown("### 3. Upload Documents (.docx or .pdf)")
+        batch_doc_files = st.file_uploader(
+            "Upload .docx or .pdf files for batch processing",
+            type=["docx", "pdf"],
+            accept_multiple_files=True,
+            help="Select multiple .docx or .pdf files to process in batch",
+            key="batch_doc_files"
+        )
+        
+        if batch_doc_files:
+            docx_count = sum(1 for f in batch_doc_files if f.name.lower().endswith('.docx'))
+            pdf_count = sum(1 for f in batch_doc_files if f.name.lower().endswith('.pdf'))
+            st.success(f"✅ {len(batch_doc_files)} file(s) uploaded ({docx_count} .docx, {pdf_count} .pdf)")
+            with st.expander("Uploaded Files", expanded=False):
+                for idx, f in enumerate(batch_doc_files, 1):
+                    file_type = "📄 DOCX" if f.name.lower().endswith('.docx') else "📑 PDF"
+                    st.write(f"{idx}. {file_type} - {f.name}")
+        
+        # Output directory
+        st.markdown("### 4. Set Output Directory")
+        batch_output_dir = st.text_input(
+            "Batch Output Directory", 
+            value=str(O1_ASSESSMENT_DIR / "batch_results"),
+            help="Directory where all batch results will be saved.",
+            key="batch_output_dir"
+        )
+        
+        # Run batch processing button
+        batch_run_disabled = not (batch_prompt_file and batch_doc_files)
+        
+        if batch_run_disabled:
+            st.warning("Please upload a prompt file and at least one document file (.docx or .pdf) to start batch processing.")
+        
+        st.markdown("### 5. Run Batch Processing")
+        batch_col1, batch_col2 = st.columns([3, 1])
+        with batch_col1:
+            run_batch_button = st.button(
+                "🚀 Run Batch Processing",
+                disabled=batch_run_disabled,
+                help="Process all uploaded .docx files",
+                use_container_width=True,
+                key="run_batch_button"
+            )
+        with batch_col2:
+            if 'batch_results' in st.session_state and st.session_state.batch_results:
+                if st.button("📊 View Results", use_container_width=True, key="view_batch_results"):
+                    st.session_state.show_batch_results = True
+        
+        # Process batch if button clicked
+        if run_batch_button:
+            st.markdown("---")
+            st.subheader("Batch Processing Progress")
+            
+            # Create progress indicators
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            console_output_batch = st.empty()
+            
+            console_log = "Starting batch processing...\n"
+            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+            
+            # Create temporary directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_dir_path = Path(temp_dir)
+                
+                # Save prompt file
+                batch_prompt_path = temp_dir_path / batch_prompt_file.name
+                prompt_content_to_save = st.session_state.get('batch_edited_prompt', None)
+                if prompt_content_to_save:
+                    with open(batch_prompt_path, "w", encoding='utf-8') as f:
+                        f.write(prompt_content_to_save)
+                else:
+                    with open(batch_prompt_path, "wb") as f:
+                        f.write(batch_prompt_file.getbuffer())
+                console_log += f"Saved prompt file: {batch_prompt_file.name}\n"
+                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                
+                # Save JSON template if provided
+                batch_json_path = None
+                if batch_json_template:
+                    batch_json_path = temp_dir_path / batch_json_template.name
+                    with open(batch_json_path, "wb") as f:
+                        f.write(batch_json_template.getbuffer())
+                    console_log += f"Saved JSON template: {batch_json_template.name}\n"
+                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                else:
+                    console_log += "No JSON template provided - output will be in HTML format\n"
+                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                
+                # Create output directory
+                os.makedirs(batch_output_dir, exist_ok=True)
+                
+                # Process each document file
+                batch_results = []
+                total_files = len(batch_doc_files)
+                
+                for idx, doc_file in enumerate(batch_doc_files, 1):
+                    file_base_name = Path(doc_file.name).stem
+                    file_ext = Path(doc_file.name).suffix.lower()
+                    is_pdf = file_ext == '.pdf'
+                    
+                    progress = idx / total_files
+                    progress_bar.progress(progress)
+                    status_text.info(f"Processing {idx}/{total_files}: {doc_file.name}")
+                    
+                    console_log += f"\n{'='*60}\n"
+                    console_log += f"Processing file {idx}/{total_files}: {doc_file.name} ({'PDF' if is_pdf else 'DOCX'})\n"
+                    console_log += f"{'='*60}\n"
+                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                    
+                    try:
+                        # Save document file
+                        doc_path = temp_dir_path / doc_file.name
+                        with open(doc_path, "wb") as f:
+                            f.write(doc_file.getbuffer())
+                        
+                        md_path = None
+                        pdf_path = None
+                        
+                        # Step 1: Convert DOCX to markdown (skip for PDF)
+                        if not is_pdf:
+                            md_file_name = f"{doc_file.name}.md"
+                            md_path = Path(batch_output_dir) / md_file_name
+                            
+                            console_log += f"Step 1: Converting to markdown...\n"
+                            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                            
+                            docx2md_path = REPO_ROOT / "docx2md.py"
+                            cmd_convert = [
+                                sys.executable, str(docx2md_path),
+                                "--docx_file", str(doc_path),
+                                "--md_file", str(md_path),
+                                "--mode", "convert"
+                            ]
+                            
+                            result = subprocess.run(cmd_convert, capture_output=True, text=True, cwd=str(O1_ASSESSMENT_DIR))
+                            console_log += result.stdout
+                            if result.stderr:
+                                console_log += result.stderr
+                            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                            
+                            if result.returncode != 0:
+                                error_msg = f"ERROR: Failed to convert {doc_file.name} to markdown\n"
+                                console_log += error_msg
+                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                batch_results.append({
+                                    'file': doc_file.name,
+                                    'status': 'failed',
+                                    'error': 'Markdown conversion failed',
+                                    'output': None
+                                })
+                                continue
+                        else:
+                            console_log += f"Step 1: Using PDF directly (no conversion needed)...\n"
+                            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                            pdf_path = doc_path
+                        
+                        # Step 2: Run analysis
+                        output_ext = ".json" if batch_json_path else ".html"
+                        output_file_name = f"{file_base_name}-analysis{output_ext}"
+                        output_file_path = Path(batch_output_dir) / output_file_name
+                        
+                        console_log += f"Step 2: Running analysis...\n"
+                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                        
+                        awreason_path = REPO_ROOT / "awreason.py"
+                        cmd_analyze = [
+                            sys.executable, str(awreason_path),
+                            "--promptfile", str(batch_prompt_path)
+                        ]
+                        
+                        # Add PDF or markdown file
+                        if is_pdf:
+                            cmd_analyze.extend(["--pdf_file1", str(pdf_path)])
+                        else:
+                            cmd_analyze.extend(["--md_file", str(md_path)])
+                        
+                        # Add JSON template if provided
+                        if batch_json_path:
+                            cmd_analyze.extend(["--jsonout_template", str(batch_json_path)])
+                        
+                        # Add output file
+                        cmd_analyze.extend(["--output", str(output_file_path)])
+                        
+                        result = subprocess.run(cmd_analyze, capture_output=True, text=True, cwd=str(O1_ASSESSMENT_DIR))
+                        console_log += result.stdout
+                        if result.stderr:
+                            console_log += result.stderr
+                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                        
+                        if result.returncode != 0:
+                            error_msg = f"ERROR: Failed to analyze {doc_file.name}\n"
+                            console_log += error_msg
+                            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                            batch_results.append({
+                                'file': doc_file.name,
+                                'status': 'failed',
+                                'error': 'Analysis failed',
+                                'output': None
+                            })
+                            continue
+                        
+                        # Success
+                        console_log += f"✓ COMPLETED: {doc_file.name} -> {output_file_name}\n"
+                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                        
+                        result_data = {
+                            'file': doc_file.name,
+                            'status': 'success',
+                            'output': str(output_file_path)
+                        }
+                        if md_path:
+                            result_data['markdown'] = str(md_path)
+                        batch_results.append(result_data)
+                        
+                    except Exception as e:
+                        error_msg = f"ERROR: Exception processing {doc_file.name}: {str(e)}\n"
+                        console_log += error_msg
+                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                        batch_results.append({
+                            'file': doc_file.name,
+                            'status': 'failed',
+                            'error': str(e),
+                            'output': None
+                        })
+                
+                # Complete
+                progress_bar.progress(1.0)
+                status_text.success(f"✅ Batch processing complete! Processed {total_files} file(s).")
+                console_log += f"\n{'='*60}\n"
+                console_log += f"Batch processing complete!\n"
+                console_log += f"{'='*60}\n"
+                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                
+                # Store results in session state
+                st.session_state.batch_results = batch_results
+                st.session_state.show_batch_results = True
+        
+        # Display batch results
+        if st.session_state.get('show_batch_results') and st.session_state.get('batch_results'):
+            st.markdown("---")
+            st.markdown("### Batch Results Summary")
+            
+            results = st.session_state.batch_results
+            success_count = sum(1 for r in results if r['status'] == 'success')
+            failed_count = len(results) - success_count
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Files", len(results))
+            with col2:
+                st.metric("Successful", success_count)
+            with col3:
+                st.metric("Failed", failed_count)
+            
+            # Show detailed results
+            st.markdown("#### Detailed Results")
+            for result in results:
+                with st.expander(f"{'✅' if result['status'] == 'success' else '❌'} {result['file']}", expanded=False):
+                    if result['status'] == 'success':
+                        st.success("Processing completed successfully")
+                        output_type = "JSON" if result['output'].endswith('.json') else "HTML"
+                        st.write(f"**Output {output_type}:** {result['output']}")
+                        if 'markdown' in result:
+                            st.write(f"**Markdown:** {result['markdown']}")
+                        
+                        # Preview output
+                        if os.path.exists(result['output']):
+                            with st.container():
+                                st.markdown("**Preview:**")
+                                display_file_content(result['output'])
+                            
+                            # Download link
+                            st.markdown(
+                                get_binary_file_downloader_html(result['output'], f"Download {os.path.basename(result['output'])}"),
+                                unsafe_allow_html=True
+                            )
+                    else:
+                        st.error(f"Processing failed: {result.get('error', 'Unknown error')}")
+    
+    with tab4:
         st.markdown("<h2 class='section-header'>Chat Assistant</h2>", unsafe_allow_html=True)
         
         # Show Azure OpenAI connection status
@@ -888,7 +1228,7 @@ def main():
                     send_chat_message("What information do I need to provide to run an assessment?")
                     st.rerun()
     
-    with tab4:
+    with tab5:
         st.markdown("<h2 class='section-header'>Help & Information</h2>", unsafe_allow_html=True)
         
         st.markdown("""
