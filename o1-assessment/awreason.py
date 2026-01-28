@@ -8,6 +8,10 @@ import base64
 import argparse
 import sys
 import json
+import logging
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
+from datetime import datetime
+import time
 from pathlib import Path
 from openai import AzureOpenAI  
 from azure.identity import DefaultAzureCredential, AzureCliCredential, get_bearer_token_provider  
@@ -16,6 +20,63 @@ import tempfile
 
 # Import the PDF processing utilities
 from pdf2png_utils import extract_pdf_pages_to_images, join_images_in_pairs
+
+# Initialize logger
+logger = logging.getLogger(__name__)
+
+def setup_logging():
+    """
+    Configure Azure-compliant logging with both file and console handlers.
+    Log level is controlled by LOG_LEVEL environment variable (default: INFO).
+    Local log files are created in ../logs/ directory with daily rotation and 5MB size limit.
+    """
+    # Get log level from environment variable (default to INFO)
+    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    
+    # Create logs directory if it doesn't exist
+    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Create log filename with date (for daily rotation)
+    date_str = datetime.now().strftime("%Y%m%d")
+    log_file = os.path.join(log_dir, f"awreason_{date_str}.log")
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    # Remove existing handlers to avoid duplicates
+    root_logger.handlers.clear()
+    
+    # Azure-compliant log format
+    log_format = logging.Formatter(
+        fmt='%(asctime)s [%(levelname)s] %(name)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # File handler with size-based rotation (5MB max, keep 30 backups for ~30 days)
+    # This rotates when file reaches 5MB or daily (whichever comes first due to date in filename)
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=5*1024*1024,  # 5MB
+        backupCount=30,  # Keep 30 backup files (~30 days of logs)
+        encoding='utf-8'
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(log_format)
+    root_logger.addHandler(file_handler)
+    
+    # Console handler - outputs to stdout
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(log_format)
+    root_logger.addHandler(console_handler)
+    
+    # Log the logging configuration
+    logger.info(f"Logging initialized: Level={log_level_str}, File={log_file}")
+    
+    return log_file
 
 def encode_image_to_base64(image_path):
     """Encode an image file to base64 string."""
@@ -28,7 +89,7 @@ def read_prompt_from_file(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read().strip()
     except Exception as e:
-        print(f"Error reading prompt file {file_path}: {e}")
+        logger.error(f"Error reading prompt file {file_path}: {e}")
         return None
 
 def convert_docx_to_md(docx_path, temp_dir):
@@ -40,7 +101,7 @@ def convert_docx_to_md(docx_path, temp_dir):
         from docx import Document  # type: ignore
         from markdownify import markdownify as md  # type: ignore
     except ImportError:
-        print("Please install python-docx and markdownify: pip install python-docx markdownify")
+        logger.error("Please install python-docx and markdownify: pip install python-docx markdownify")
         raise ImportError("Required libraries not found")
 
     # Output directory for markdown
@@ -53,7 +114,7 @@ def convert_docx_to_md(docx_path, temp_dir):
 
     try:
         # Convert DOCX to markdown directly
-        print(f"Converting DOCX to markdown: {docx_path}")
+        logger.info(f"Converting DOCX to markdown: {docx_path}")
         doc = Document(docx_path)
         full_text = []
         for para in doc.paragraphs:
@@ -64,11 +125,11 @@ def convert_docx_to_md(docx_path, temp_dir):
         with open(md_filename, "w", encoding="utf-8") as f:
             f.write(md_text)
             
-        print(f"Successfully converted DOCX to markdown: {md_filename}")
+        logger.info(f"Successfully converted DOCX to markdown: {md_filename}")
         return md_filename
         
     except Exception as e:
-        print(f"Error converting DOCX to markdown: {e}")
+        logger.error(f"Error converting DOCX to markdown: {e}")
         raise RuntimeError("DOCX conversion failed")
 
 def read_markdown_file(file_path):
@@ -77,7 +138,7 @@ def read_markdown_file(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read().strip()
     except Exception as e:
-        print(f"Error reading Markdown file {file_path}: {e}")
+        logger.error(f"Error reading Markdown file {file_path}: {e}")
         return None
 
 def ensure_directory_exists(file_path):
@@ -85,7 +146,7 @@ def ensure_directory_exists(file_path):
     directory = os.path.dirname(file_path)
     if directory and not os.path.exists(directory):
         os.makedirs(directory)
-        print(f"Created directory: {directory}")
+        logger.info(f"Created directory: {directory}")
 
 def ensure_output_path(output_path, source_path=None, alt_source_path=None):
     """
@@ -136,7 +197,7 @@ def process_pdf_to_images(pdf_path, image_dir, join_images=None):
     
     # Join images if requested
     if join_images in ['vertical', 'horizontal']:
-        print(f"Joining images {join_images}ly from {output_dir}")
+        logger.info(f"Joining images {join_images}ly from {output_dir}")
         join_images_in_pairs(output_dir, join_direction=join_images)
         
         # Update the output directory to the joined images folder
@@ -151,16 +212,16 @@ def get_images_from_folder(folder_path):
     """Get all image files from a folder and return them as a list, sorted by numerical order."""
     image_folder = Path(folder_path)
     if not image_folder.exists() or not image_folder.is_dir():
-        print(f"WARNING: Image folder does not exist or is not a directory: {folder_path}")
+        logger.warning(f"Image folder does not exist or is not a directory: {folder_path}")
         return []
     
     # Find all image files in the folder (PNG, JPG, JPEG)
     image_files = list(image_folder.glob("*.png")) + list(image_folder.glob("*.jpg")) + list(image_folder.glob("*.jpeg"))
     
     if not image_files:
-        print(f"WARNING: No image files found in {folder_path}")
+        logger.warning(f"No image files found in {folder_path}")
     else:
-        print(f"Found {len(image_files)} image files in {folder_path}")
+        logger.info(f"Found {len(image_files)} image files in {folder_path}")
     
     # Sort the image files by numerical order (for filenames like "1_2.png", "3_4.png", etc.)
     def extract_page_numbers(filename):
@@ -186,11 +247,11 @@ def find_pdfs_in_directory(directory_path):
         pdf_files = [f for f in os.listdir(directory_path) if f.lower().endswith('.pdf')]
         if pdf_files:
             pdf_files = [os.path.join(directory_path, pdf) for pdf in pdf_files]
-            print(f"Found {len(pdf_files)} PDF files in {directory_path}")
+            logger.info(f"Found {len(pdf_files)} PDF files in {directory_path}")
         else:
-            print(f"No PDF files found in {directory_path}")
+            logger.warning(f"No PDF files found in {directory_path}")
     else:
-        print(f"The path {directory_path} is not a directory")
+        logger.warning(f"The path {directory_path} is not a directory")
     
     return pdf_files
 
@@ -211,13 +272,13 @@ def save_response_to_file(response_text, file_path, is_json=False):
                     except json.JSONDecodeError:
                         # If not valid JSON, save as plain text
                         f.write(response_text)
-                        print("WARNING: Response was not valid JSON. Saving as plain text.")
+                        logger.warning("Response was not valid JSON. Saving as plain text.")
             else:
                 f.write(response_text)
-        print(f"Response saved to: {file_path}")
+        logger.info(f"Response saved to: {file_path}")
         return True
     except Exception as e:
-        print(f"Error saving response to {file_path}: {e}")
+        logger.error(f"Error saving response to {file_path}: {e}")
         return False
 
 def read_json_template(template_path):
@@ -226,17 +287,24 @@ def read_json_template(template_path):
         with open(template_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        print(f"Error reading JSON template file {template_path}: {e}")
+        logger.error(f"Error reading JSON template file {template_path}: {e}")
         return None
 
 def main():
-    print("\n" + "="*80)
-    print("🔧 AWREASON.PY EXECUTION STARTED")
-    print("="*80)
-    print(f"Script location: {__file__}")
-    print(f"Current working directory: {os.getcwd()}")
-    print(f"Command line args: {sys.argv}")
-    print("="*80)
+    # Initialize logging first
+    log_file = setup_logging()
+    
+    # Start timing the request
+    start_time = time.time()
+    
+    logger.info("="*80)
+    logger.info("AWREASON.PY EXECUTION STARTED")
+    logger.info("="*80)
+    logger.debug(f"Script location: {__file__}")
+    logger.debug(f"Current working directory: {os.getcwd()}")
+    logger.debug(f"Command line args: {sys.argv}")
+    logger.debug(f"Log file: {log_file}")
+    logger.info("="*80)
     
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Chat with O1 model using text and images')
@@ -277,7 +345,7 @@ def main():
     elif args.promptfile:
         prompt_text = read_prompt_from_file(args.promptfile)
         if not prompt_text:
-            print("Failed to read prompt from file. Exiting.")
+            logger.error("Failed to read prompt from file. Exiting.")
             return
     
     # If a markdown file is provided, read its content
@@ -290,9 +358,9 @@ def main():
             md_file_path = convert_docx_to_md(md_file_path, temp_dir)
         markdown_content = read_markdown_file(md_file_path)
         if not markdown_content:
-            print("Failed to read Markdown file. Exiting.")
+            logger.error("Failed to read Markdown file. Exiting.")
             return
-        print(f"Loaded Markdown content from: {md_file_path}")
+        logger.info(f"Loaded Markdown content from: {md_file_path}")
 
         # If we also have a prompt, combine them
         if prompt_text:
@@ -305,9 +373,9 @@ def main():
     if args.jsonout_template:
         json_template = read_json_template(args.jsonout_template)
         if not json_template:
-            print("Failed to read JSON template. Exiting.")
+            logger.error("Failed to read JSON template. Exiting.")
             return
-        print(f"Loaded JSON template from: {args.jsonout_template}")
+        logger.info(f"Loaded JSON template from: {args.jsonout_template}")
         
         # Check if we need to enhance the prompt with JSON template info
         if prompt_text and json_template:
@@ -322,7 +390,7 @@ def main():
     # Set up image processing directories
     temp_dir = args.tempdir if args.tempdir else tempfile.mkdtemp()
     ensure_directory_exists(temp_dir)
-    print(f"Using temporary directory: {temp_dir}")
+    logger.info(f"Using temporary directory: {temp_dir}")
     
     # Collect images based on the source option
     folder1_images = []
@@ -333,75 +401,76 @@ def main():
     # Process --pdf_file1 (if provided)
     if args.pdf_file1:
         if not (os.path.isfile(args.pdf_file1) and args.pdf_file1.lower().endswith('.pdf')):
-            print(f"Error: {args.pdf_file1} is not a valid PDF file. Exiting.")
+            logger.error(f"{args.pdf_file1} is not a valid PDF file. Exiting.")
             return
         pdf1_dir = process_pdf_to_images(args.pdf_file1, temp_dir, args.join)
         folder1_images = get_images_from_folder(pdf1_dir)
         folder1_name = Path(args.pdf_file1).name
-        print(f"Processed PDF from --pdf_file1: {os.path.basename(args.pdf_file1)}")
+        logger.info(f"Processed PDF from --pdf_file1: {os.path.basename(args.pdf_file1)}")
 
     # Process --pdf_file2 (if provided)
     if args.pdf_file2:
         if not (os.path.isfile(args.pdf_file2) and args.pdf_file2.lower().endswith('.pdf')):
-            print(f"Error: {args.pdf_file2} is not a valid PDF file. Exiting.")
+            logger.error(f"{args.pdf_file2} is not a valid PDF file. Exiting.")
             return
         pdf2_dir = process_pdf_to_images(args.pdf_file2, temp_dir, args.join)
         folder2_images = get_images_from_folder(pdf2_dir)
         folder2_name = Path(args.pdf_file2).name
-        print(f"Processed PDF from --pdf_file2: {os.path.basename(args.pdf_file2)}")
+        logger.info(f"Processed PDF from --pdf_file2: {os.path.basename(args.pdf_file2)}")
 
     # If image folders are provided, they override the PDFs
     if args.images_folder1:
         folder1_images = get_images_from_folder(args.images_folder1)
         folder1_name = Path(args.images_folder1).name
-        print(f"Collected {len(folder1_images)} images from folder 1")
+        logger.info(f"Collected {len(folder1_images)} images from folder 1")
     if args.images_folder2:
         folder2_images = get_images_from_folder(args.images_folder2)
         folder2_name = Path(args.images_folder2).name
-        print(f"Collected {len(folder2_images)} images from folder 2")
+        logger.info(f"Collected {len(folder2_images)} images from folder 2")
 
     # Check the total number of images
     image_count = len(folder1_images) + len(folder2_images)
-    print(f"Total image count: {image_count}")
+    logger.info(f"Total image count: {image_count}")
     
     if image_count > 50:
-        print(f"ERROR: Found {image_count} images in total, which exceeds the maximum limit of 50 images.")
-        print("The O1 model cannot process more than 50 images at once due to current limitations.")
-        print("\nRecommendations:")
-        print("1. Reduce the number of images to process by selecting a subset of the most important ones.")
-        print("2. Consider using Retrieval Augmented Generation (RAG) for larger document collections.")
-        print("3. Split your images into multiple separate requests.")
-        print("\nExiting program.")
+        logger.error(f"Found {image_count} images in total, which exceeds the maximum limit of 50 images.")
+        logger.error("The O1 model cannot process more than 50 images at once due to current limitations.")
+        logger.info("Recommendations:")
+        logger.info("1. Reduce the number of images to process by selecting a subset of the most important ones.")
+        logger.info("2. Consider using Retrieval Augmented Generation (RAG) for larger document collections.")
+        logger.info("3. Split your images into multiple separate requests.")
+        logger.error("Exiting program.")
         sys.exit(1)
     elif image_count == 0 and not args.md_file:
-        print("WARNING: No image files found based on the provided arguments.")
-        print("Note: The O1 model can work with text-only prompts, but since this tool is designed")
-        print("for visual reasoning, you might want to check your input paths.")
+        logger.warning("No image files found based on the provided arguments.")
+        logger.warning("Note: The O1 model can work with text-only prompts, but since this tool is designed")
+        logger.warning("for visual reasoning, you might want to check your input paths.")
 
     # Cross-platform .env loading
     dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
     dotenv_path = os.path.abspath(os.path.expanduser(dotenv_path))
     
     # Debug: Print .env file loading info
-    print("\n" + "="*60)
-    print(".ENV FILE LOADING DEBUG:")
-    print("="*60)
-    print(f"Looking for .env file at: {dotenv_path}")
-    print(f".env file exists: {os.path.exists(dotenv_path)}")
+    logger.debug("="*60)
+    logger.debug(".ENV FILE LOADING DEBUG:")
+    logger.debug("="*60)
+    logger.debug(f"Looking for .env file at: {dotenv_path}")
+    logger.debug(f".env file exists: {os.path.exists(dotenv_path)}")
     
     load_dotenv_result = load_dotenv(dotenv_path=dotenv_path, override=True)
-    print(f"load_dotenv() returned: {load_dotenv_result}")
+    logger.debug(f"load_dotenv() returned: {load_dotenv_result}")
     
     # Debug: Show all AZURE_ environment variables
-    print("\nAll AZURE_ environment variables loaded:")
-    azure_vars = {k: v for k, v in os.environ.items() if k.startswith("AZURE_")}
-    for key in sorted(azure_vars.keys()):
-        # Mask sensitive values
-        value = azure_vars[key]
-        if "KEY" in key or "SECRET" in key:
-            value = value[:10] + "..." if len(value) > 10 else "[MASKED]"
-        print(f"  {key} = {value}")
-    print("="*60)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("All AZURE_ environment variables loaded:")
+        azure_vars = {k: v for k, v in os.environ.items() if k.startswith("AZURE_")}
+        for key in sorted(azure_vars.keys()):
+            # Mask sensitive values
+            value = azure_vars[key]
+            if "KEY" in key or "SECRET" in key:
+                value = value[:10] + "..." if len(value) > 10 else "[MASKED]"
+            logger.debug(f"  {key} = {value}")
+    logger.debug("="*60)
 
     # Retrieve environment variables with defaults
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -412,54 +481,56 @@ def main():
     subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
 
     # Debug: Print assigned environment variables
-    print("\n" + "="*60)
-    print("Azure OpenAI Configuration Debug Info:")
-    print("="*60)
-    print(f"Azure OpenAI Endpoint: {endpoint}")
-    print(f"Deployment Name: {deployment}")
-    print(f"API Version: {api_version}")
-    print(f"Azure Tenant ID: {tenant_id if tenant_id else 'Not set (using DefaultAzureCredential)'}")
-    print(f"Base URL that will be used: {endpoint}")
+    logger.info("="*60)
+    logger.info("Azure OpenAI Configuration Debug Info:")
+    logger.info("="*60)
+    logger.info(f"Azure OpenAI Endpoint: {endpoint}")
+    logger.info(f"Deployment Name: {deployment}")
+    logger.info(f"API Version: {api_version}")
+    logger.info(f"API Key: {'Set (will use API key auth)' if api_key else 'Not set (will use Entra ID auth)'}")
+    logger.info(f"Azure Tenant ID: {tenant_id if tenant_id else 'Not set'}")
+    logger.info(f"Azure Subscription ID: {subscription_id if subscription_id else 'Not set'}")
+    logger.info(f"Base URL that will be used: {endpoint}")
     
     # Validate configuration
     if not endpoint:
-        print("ERROR: AZURE_OPENAI_ENDPOINT environment variable is not set!")
+        logger.error("AZURE_OPENAI_ENDPOINT environment variable is not set!")
         sys.exit(1)
     if not deployment:
-        print("ERROR: AZURE_OPENAI_DEPLOYMENT_O1 environment variable is not set!")
+        logger.error("AZURE_OPENAI_DEPLOYMENT_O1 environment variable is not set!")
         sys.exit(1)
     if not api_version:
-        print("ERROR: AZURE_OPENAI_API_VERSION environment variable is not set!")
+        logger.error("AZURE_OPENAI_API_VERSION environment variable is not set!")
         sys.exit(1)
         
-    print("Configuration validation passed.")
-    print("="*60)
+    logger.info("Configuration validation passed.")
+    logger.info("="*60)
 
     # Initialize Azure OpenAI client
     # Use API key authentication if available, otherwise use Entra ID
     if api_key:
-        print("\n🔑 Using API Key authentication")
+        logger.info("Using API Key authentication")
         client = AzureOpenAI(  
             azure_endpoint=endpoint,  
             api_key=api_key,  
             api_version=api_version,  
         )
     else:
-        print("\n🔐 Using Entra ID (Azure AD) authentication")
+        logger.info("Using Entra ID (Azure AD) authentication")
         cognitiveServicesResource = "https://cognitiveservices.azure.com/"
         
         # Ensure Azure CLI path is in the environment PATH
         az_cli_path = r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin"
         if az_cli_path not in os.environ.get("PATH", ""):
             os.environ["PATH"] = az_cli_path + os.pathsep + os.environ.get("PATH", "")
-            print(f"Added Azure CLI to PATH: {az_cli_path}")
+            logger.debug(f"Added Azure CLI to PATH: {az_cli_path}")
         
         # Use DefaultAzureCredential which tries multiple authentication methods
         # It will attempt (in order): Environment, ManagedIdentity, SharedTokenCache, 
         # VisualStudioCode, AzureCli, AzurePowerShell, AzureDeveloperCli
         if tenant_id:
-            print(f"Using DefaultAzureCredential with tenant ID: {tenant_id}")
-            print("Will attempt multiple authentication methods (CLI, PowerShell, VSCode, etc.)")
+            logger.info(f"Using DefaultAzureCredential with tenant ID: {tenant_id}")
+            logger.debug("Will attempt multiple authentication methods (CLI, PowerShell, VSCode, etc.)")
             # Set environment variables for DefaultAzureCredential
             os.environ["AZURE_TENANT_ID"] = tenant_id
             if subscription_id:
@@ -471,7 +542,7 @@ def main():
                 process_timeout=60  # Increase timeout to 60 seconds
             )
         else:
-            print("Using DefaultAzureCredential without tenant ID")
+            logger.info("Using DefaultAzureCredential without tenant ID")
             credential = DefaultAzureCredential(process_timeout=60)
         
         token_provider = get_bearer_token_provider(  
@@ -506,7 +577,7 @@ def main():
         
         # Append document explanation to the original prompt
         prompt_text += document_explanation # type: ignore
-        print(f"Enhanced prompt with document separation information")
+        logger.info("Enhanced prompt with document separation information")
     
     # Add the text prompt
     messages[1]["content"].append({"type": "text", "text": prompt_text})
@@ -514,11 +585,11 @@ def main():
     # Add all collected images to the message content
     total_images = len(folder1_images) + len(folder2_images)
     if total_images > 0:
-        print(f"Adding {total_images} images to the request...")
+        logger.info(f"Adding {total_images} images to the request...")
         
         # Add images from folder 1 first (in their proper page order)
         if folder1_images:
-            print(f"Adding {len(folder1_images)} images from folder 1 to the request...")
+            logger.info(f"Adding {len(folder1_images)} images from folder 1 to the request...")
             for img_path in folder1_images:
                 try:
                     base64_image = encode_image_to_base64(img_path)
@@ -528,13 +599,13 @@ def main():
                             "url": f"data:image/png;base64,{base64_image}"
                         }
                     })
-                    print(f"Added image: {img_path.name}")
+                    logger.debug(f"Added image: {img_path.name}")
                 except Exception as e:
-                    print(f"Error processing image {img_path}: {e}")
+                    logger.error(f"Error processing image {img_path}: {e}")
         
         # Then add images from folder 2 (in their proper page order)
         if folder2_images:
-            print(f"Adding {len(folder2_images)} images from folder 2 to the request...")
+            logger.info(f"Adding {len(folder2_images)} images from folder 2 to the request...")
             for img_path in folder2_images:
                 try:
                     base64_image = encode_image_to_base64(img_path)
@@ -544,9 +615,9 @@ def main():
                             "url": f"data:image/png;base64,{base64_image}"
                         }
                     })
-                    print(f"Added image: {img_path.name}")
+                    logger.debug(f"Added image: {img_path.name}")
                 except Exception as e:
-                    print(f"Error processing image {img_path}: {e}")
+                    logger.error(f"Error processing image {img_path}: {e}")
     
     # Configure additional parameters for the O1 model
     completion_params = {
@@ -557,8 +628,8 @@ def main():
     }
     
     # Check API version and adjust parameters accordingly
-    print(f"\n📝 CONFIGURING REQUEST PARAMETERS:")
-    print(f"Using API version: {api_version}")
+    logger.info("CONFIGURING REQUEST PARAMETERS:")
+    logger.info(f"Using API version: {api_version}")
     
     # For newer API versions (2024-02-01-preview and later)
     if api_version.startswith("2024"):
@@ -573,20 +644,20 @@ def main():
     # Add response_format parameter for JSON output if template was provided
     if json_template:
         completion_params["response_format"] = {"type": "json_object"}
-        print("Requesting structured JSON output from the model")
+        logger.info("Requesting structured JSON output from the model")
     
     # Send the request to the o1 model
-    print("\nSending request to o1 model...")
+    logger.info("Sending request to o1 model...")
     
     # Print detailed debugging information before making the API call
-    print("\n" + "="*60)
-    print("API CALL DEBUG INFORMATION")
-    print("="*60)
-    print(f"Model/Deployment: {completion_params['model']}")
-    print(f"API Endpoint: {endpoint}")
-    print(f"API Version: {client._api_version}")
-    print(f"Number of messages: {len(completion_params['messages'])}")
-    print(f"Total images in request: {total_images}")
+    logger.debug("="*60)
+    logger.debug("API CALL DEBUG INFORMATION")
+    logger.debug("="*60)
+    logger.debug(f"Model/Deployment: {completion_params['model']}")
+    logger.debug(f"API Endpoint: {endpoint}")
+    logger.debug(f"API Version: {client._api_version}")
+    logger.debug(f"Number of messages: {len(completion_params['messages'])}")
+    logger.debug(f"Total images in request: {total_images}")
     
     # Print request parameters (excluding image data for brevity)
     debug_params = completion_params.copy()
@@ -606,52 +677,57 @@ def main():
             debug_messages.append(debug_msg)
         debug_params['messages'] = debug_messages
     
-    print(f"Request parameters: {json.dumps(debug_params, indent=2)}")
-    print("="*60)
+    logger.debug(f"Request parameters: {json.dumps(debug_params, indent=2)}")
+    logger.debug("="*60)
+    
+    # Time the API request
+    api_start_time = time.time()
     
     try:
         completion = client.chat.completions.create(**completion_params)
+        api_duration = time.time() - api_start_time
+        logger.info(f"API request completed in {api_duration:.2f} seconds")
     except Exception as e:
-        # Print comprehensive error information
-        print("\n" + "="*60)
-        print("ERROR DETAILS - FIRST ATTEMPT FAILED")
-        print("="*60)
-        print(f"Error Type: {type(e).__name__}")
-        print(f"Error Message: {str(e)}")
+        # Log comprehensive error information
+        logger.error("="*60)
+        logger.error("ERROR DETAILS - FIRST ATTEMPT FAILED")
+        logger.error("="*60)
+        logger.error(f"Error Type: {type(e).__name__}")
+        logger.error(f"Error Message: {str(e)}")
         
         # Check for specific error types and provide detailed diagnostics
         status_code = getattr(e, 'status_code', None)
         if status_code:
-            print(f"HTTP Status Code: {status_code}")
+            logger.error(f"HTTP Status Code: {status_code}")
         if hasattr(e, 'response') and getattr(e, 'response', None):
             response = getattr(e, 'response')  # type: ignore
-            print(f"Response Headers: {dict(response.headers) if hasattr(response, 'headers') else 'N/A'}")
+            logger.error(f"Response Headers: {dict(response.headers) if hasattr(response, 'headers') else 'N/A'}")
             try:
                 response_text = response.text if hasattr(response, 'text') else str(response)
-                print(f"Response Body: {response_text}")
+                logger.error(f"Response Body: {response_text}")
             except:
-                print("Could not read response body")
+                logger.error("Could not read response body")
         
         # Provide specific guidance based on error type
         if "404" in str(e) or "Not Found" in str(e):
-            print("\n🔍 404 ERROR DIAGNOSIS:")
-            print(f"   • Endpoint: {endpoint}")
-            print(f"   • Deployment: {deployment}")
-            print(f"   • API Version: {client._api_version}")
-            print("   • Possible causes:")
-            print("     1. Deployment name is incorrect or doesn't exist")
-            print("     2. API version is not supported for this deployment")
-            print("     3. Endpoint URL is incorrect")
-            print("     4. Deployment is not in the same region as the endpoint")
-            print("     5. You don't have access to this deployment")
-            print("\n💡 Troubleshooting steps:")
-            print("   1. Check Azure Portal for correct deployment name")
-            print("   2. Verify the deployment supports the API version")
-            print("   3. Ensure the deployment is in 'Succeeded' state")
-            print("   4. Check your access permissions")
+            logger.error("404 ERROR DIAGNOSIS:")
+            logger.error(f"   • Endpoint: {endpoint}")
+            logger.error(f"   • Deployment: {deployment}")
+            logger.error(f"   • API Version: {client._api_version}")
+            logger.error("   • Possible causes:")
+            logger.error("     1. Deployment name is incorrect or doesn't exist")
+            logger.error("     2. API version is not supported for this deployment")
+            logger.error("     3. Endpoint URL is incorrect")
+            logger.error("     4. Deployment is not in the same region as the endpoint")
+            logger.error("     5. You don't have access to this deployment")
+            logger.info("Troubleshooting steps:")
+            logger.info("   1. Check Azure Portal for correct deployment name")
+            logger.info("   2. Verify the deployment supports the API version")
+            logger.info("   3. Ensure the deployment is in 'Succeeded' state")
+            logger.info("   4. Check your access permissions")
             
-        print("\nRetrying with simplified parameters...")
-        print("="*60)
+        logger.info("Retrying with simplified parameters...")
+        logger.debug("="*60)
         
         # Create a simplified parameter set (removing reasoning_effort)
         fallback_params = {
@@ -670,48 +746,52 @@ def main():
         if json_template:
             fallback_params["response_format"] = {"type": "json_object"}
         
-        # Print fallback parameters
-        print("\nFALLBACK REQUEST DEBUG:")
-        print(f"Fallback parameters: {json.dumps({k: v for k, v in fallback_params.items() if k != 'messages'}, indent=2)}")
-        print(f"Messages count: {len(fallback_params['messages'])}")
+        # Log fallback parameters
+        logger.debug("FALLBACK REQUEST DEBUG:")
+        logger.debug(f"Fallback parameters: {json.dumps({k: v for k, v in fallback_params.items() if k != 'messages'}, indent=2)}")
+        logger.debug(f"Messages count: {len(fallback_params['messages'])}")
+        
+        # Time the fallback API request
+        fallback_start_time = time.time()
         
         try:
             completion = client.chat.completions.create(**fallback_params)
-            print("✅ Fallback request succeeded!")
+            fallback_duration = time.time() - fallback_start_time
+            logger.info(f"Fallback request succeeded in {fallback_duration:.2f} seconds!")
         except Exception as fallback_error:
-            print("\n" + "="*60)
-            print("FALLBACK REQUEST ALSO FAILED")
-            print("="*60)
-            print(f"Fallback Error Type: {type(fallback_error).__name__}")
-            print(f"Fallback Error Message: {str(fallback_error)}")
+            logger.error("="*60)
+            logger.error("FALLBACK REQUEST ALSO FAILED")
+            logger.error("="*60)
+            logger.error(f"Fallback Error Type: {type(fallback_error).__name__}")
+            logger.error(f"Fallback Error Message: {str(fallback_error)}")
             
             if hasattr(fallback_error, 'status_code'):
-                print(f"Fallback HTTP Status Code: {getattr(fallback_error, 'status_code')}")
+                logger.error(f"Fallback HTTP Status Code: {getattr(fallback_error, 'status_code')}")
             if hasattr(fallback_error, 'response') and getattr(fallback_error, 'response', None):
                 try:
                     response = getattr(fallback_error, 'response')  # type: ignore
                     response_text = response.text if hasattr(response, 'text') else str(response)
-                    print(f"Fallback Response Body: {response_text}")
+                    logger.error(f"Fallback Response Body: {response_text}")
                 except:
-                    print("Could not read fallback response body")
+                    logger.error("Could not read fallback response body")
             
             # Check for specific error patterns
             if "tenant" in str(fallback_error).lower():
-                print("\n🚨 TENANT AUTHENTICATION ISSUE DETECTED!")
-                print("Please check your Azure authentication:")
-                print("1. Run 'az account show' to see current subscription")
-                print("2. Run 'az account list' to see all available subscriptions")
-                print("3. Run 'az account set --subscription <correct-subscription-id>'")
-                print("4. Ensure your Azure OpenAI resource is in the same tenant")
+                logger.error("TENANT AUTHENTICATION ISSUE DETECTED!")
+                logger.info("Please check your Azure authentication:")
+                logger.info("1. Run 'az account show' to see current subscription")
+                logger.info("2. Run 'az account list' to see all available subscriptions")
+                logger.info("3. Run 'az account set --subscription <correct-subscription-id>'")
+                logger.info("4. Ensure your Azure OpenAI resource is in the same tenant")
             
-            print("\n❌ Both primary and fallback requests failed.")
-            print("Please check your Azure OpenAI configuration and authentication.")
-            print("="*60)
+            logger.error("Both primary and fallback requests failed.")
+            logger.error("Please check your Azure OpenAI configuration and authentication.")
+            logger.error("="*60)
             raise Exception(f"Both API attempts failed. Primary: {str(e)}, Fallback: {str(fallback_error)}")
 
     # Success logging
-    print("\n✅ API REQUEST SUCCESSFUL!")
-    print("="*60)
+    logger.info("API REQUEST SUCCESSFUL!")
+    logger.info("="*60)
     
     # Get the response content
     response_content = completion.choices[0].message.content
@@ -721,25 +801,26 @@ def main():
     completion_tokens = completion.usage.completion_tokens
     total_tokens = completion.usage.total_tokens
     
-    print(f"Response Details:")
-    print(f"  Model used: {completion.model}")
-    print(f"  Response ID: {completion.id}")
-    print(f"  Finish reason: {completion.choices[0].finish_reason}")
-    print(f"  Response length: {len(response_content)} characters")
+    logger.info("Response Details:")
+    logger.info(f"  Model used: {completion.model}")
+    logger.info(f"  Response ID: {completion.id}")
+    logger.info(f"  Finish reason: {completion.choices[0].finish_reason}")
+    logger.info(f"  Response length: {len(response_content)} characters")
     
-    print(f"\nToken Usage Summary:")
-    print(f"  Input tokens:  {prompt_tokens:,}")
-    print(f"  Output tokens: {completion_tokens:,}")
-    print(f"  Total tokens:  {total_tokens:,}")
-    print("="*60)
+    logger.info("Token Usage Summary:")
+    logger.info(f"  Input tokens:  {prompt_tokens:,}")
+    logger.info(f"  Output tokens: {completion_tokens:,}")
+    logger.info(f"  Total tokens:  {total_tokens:,}")
+    logger.info("="*60)
     
-    # Print the response
-    print("\nO1 Response:")
-    if len(response_content) > 1000:
-        # Print first 500 and last 500 characters if response is long
-        print(response_content[:500] + "...\n...\n..." + response_content[-500:])
-    else:
-        print(response_content)
+    # Log the response (truncated if too long for DEBUG level)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("O1 Response:")
+        if len(response_content) > 1000:
+            # Log first 500 and last 500 characters if response is long
+            logger.debug(response_content[:500] + "...\\n...\\n..." + response_content[-500:])
+        else:
+            logger.debug(response_content)
 
     # Determine the output file path (fix for --output as directory)
     # If both pdf_file1 and pdf_file2 are provided and output is a directory, use pdf_file2 for output filename
@@ -757,63 +838,77 @@ def main():
         import shutil
         try:
             shutil.rmtree(temp_dir)
-            print(f"Cleaned up temporary directory: {temp_dir}")
+            logger.info(f"Cleaned up temporary directory: {temp_dir}")
         except Exception as e:
-            print(f"Warning: Could not clean up temporary directory {temp_dir}: {e}")
+            logger.warning(f"Could not clean up temporary directory {temp_dir}: {e}")
+    
+    # Calculate and log total processing duration
+    end_time = time.time()
+    duration_seconds = end_time - start_time
+    duration_minutes = duration_seconds / 60
+    
+    logger.info("="*80)
+    logger.info("PROCESSING COMPLETED SUCCESSFULLY")
+    logger.info(f"Total processing duration: {duration_seconds:.2f} seconds ({duration_minutes:.2f} minutes)")
+    logger.info("="*80)
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"\n{'='*80}")
-        print("💥 UNHANDLED ERROR OCCURRED")
-        print(f"{'='*80}")
-        print(f"Error Type: {type(e).__name__}")
-        print(f"Error Message: {str(e)}")
+        # Set up basic logging if main() failed before setup_logging()
+        if not logging.getLogger().hasHandlers():
+            logging.basicConfig(level=logging.ERROR)
         
-        # Print the full traceback
+        logger.error("="*80)
+        logger.error("UNHANDLED ERROR OCCURRED")
+        logger.error("="*80)
+        logger.error(f"Error Type: {type(e).__name__}")
+        logger.error(f"Error Message: {str(e)}")
+        
+        # Log the full traceback
         import traceback
-        print(f"\n📋 Full Traceback:")
-        traceback.print_exc()
+        logger.error("Full Traceback:")
+        logger.error(traceback.format_exc())
         
-        print(f"\n{'='*80}")
-        print("🔍 ENVIRONMENT DEBUGGING INFO")
-        print(f"{'='*80}")
+        logger.debug("="*80)
+        logger.debug("ENVIRONMENT DEBUGGING INFO")
+        logger.debug("="*80)
         
-        # Print environment variables for debugging
-        print(f"AZURE_OPENAI_ENDPOINT: {os.getenv('AZURE_OPENAI_ENDPOINT', 'NOT SET')}")
-        print(f"AZURE_OPENAI_DEPLOYMENT_O1: {os.getenv('AZURE_OPENAI_DEPLOYMENT_O1', 'NOT SET')}")
-        print(f"AZURE_OPENAI_API_VERSION: {os.getenv('AZURE_OPENAI_API_VERSION', 'NOT SET (will use default)')}")
+        # Log environment variables for debugging
+        logger.debug(f"AZURE_OPENAI_ENDPOINT: {os.getenv('AZURE_OPENAI_ENDPOINT', 'NOT SET')}")
+        logger.debug(f"AZURE_OPENAI_DEPLOYMENT_O1: {os.getenv('AZURE_OPENAI_DEPLOYMENT_O1', 'NOT SET')}")
+        logger.debug(f"AZURE_OPENAI_API_VERSION: {os.getenv('AZURE_OPENAI_API_VERSION', 'NOT SET (will use default)')}")
         
-        # Print Python and OpenAI library versions
-        print(f"\n🐍 Python Version: {sys.version}")
+        # Log Python and OpenAI library versions
+        logger.debug(f"Python Version: {sys.version}")
         try:
             import openai
-            print(f"📦 OpenAI Library Version: {openai.__version__}")
+            logger.debug(f"OpenAI Library Version: {openai.__version__}")
         except:
-            print("📦 OpenAI Library Version: Could not determine")
+            logger.debug("OpenAI Library Version: Could not determine")
             
-        print(f"\n📂 Current Working Directory: {os.getcwd()}")
-        print(f"📄 Script Location: {os.path.abspath(__file__)}")
+        logger.debug(f"Current Working Directory: {os.getcwd()}")
+        logger.debug(f"Script Location: {os.path.abspath(__file__)}")
         
         # Check Azure CLI status
-        print(f"\n☁️ AZURE AUTHENTICATION STATUS:")
+        logger.debug("AZURE AUTHENTICATION STATUS:")
         try:
             import subprocess
             result = subprocess.run(['az', 'account', 'show'], capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
-                print("✅ Azure CLI authenticated")
-                print(f"Current account info: {result.stdout[:200]}...")
+                logger.debug("Azure CLI authenticated")
+                logger.debug(f"Current account info: {result.stdout[:200]}...")
             else:
-                print("❌ Azure CLI not authenticated or error occurred")
-                print(f"Error: {result.stderr}")
+                logger.debug("Azure CLI not authenticated or error occurred")
+                logger.debug(f"Error: {result.stderr}")
         except Exception as cli_error:
-            print(f"❌ Could not check Azure CLI status: {cli_error}")
+            logger.debug(f"Could not check Azure CLI status: {cli_error}")
         
-        print(f"\n{'='*80}")
-        print("🚨 For tenant mismatch errors, try:")
-        print("   az account list")
-        print("   az account set --subscription <correct-subscription-id>")
-        print("   az login --tenant <correct-tenant-id>")
-        print(f"{'='*80}")
+        logger.error("="*80)
+        logger.info("For tenant mismatch errors, try:")
+        logger.info("   az account list")
+        logger.info("   az account set --subscription <correct-subscription-id>")
+        logger.info("   az login --tenant <correct-tenant-id>")
+        logger.error("="*80)
         sys.exit(1)

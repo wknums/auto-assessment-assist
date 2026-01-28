@@ -115,6 +115,41 @@ AZURE_TENANT_ID="your-tenant-id-here"
 AZURE_SUBSCRIPTION_ID="your-subscription-id-here"
 ```
 
+### Logging Configuration
+
+The accelerator includes Azure-compliant logging with automatic rotation and performance tracking:
+
+**Log Level Control:**
+- Set `LOG_LEVEL` in your `.env` file to control verbosity
+- **DEBUG**: Shows all details (environment variables, API parameters, image processing)
+- **INFO**: Shows normal operational messages (recommended, default)
+- **WARNING**: Shows only warnings and errors
+- **ERROR**: Shows only errors
+
+**Log File Management:**
+- Log files are stored in `logs/` directory
+- Daily rotation: Creates new file each day (format: `awreason_YYYYMMDD.log`)
+- Size-based rotation: Rotates when file reaches 5MB
+- Retention: Keeps 30 backup files (~30 days of logs)
+- Dual output: Writes to both log file and console simultaneously
+
+**Performance Tracking:**
+- Total processing duration logged for each request
+- API call duration tracked separately
+- All timing information automatically included in logs
+
+**Example .env logging configuration:**
+```
+# For production/normal use
+LOG_LEVEL="INFO"
+
+# For debugging issues
+LOG_LEVEL="DEBUG"
+
+# For minimal output
+LOG_LEVEL="ERROR"
+```
+
   
 
 Test that your environment is working (Note: this is assuming a Windows OS development environment - for Linux please adapt the paths to use forward / ):
