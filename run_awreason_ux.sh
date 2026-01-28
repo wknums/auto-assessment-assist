@@ -32,6 +32,11 @@ else
     echo -e "\033[0;33mUsing system Python installation...\033[0m"
 fi
 
+# remove any Azure-related environment variables to avoid conflicts
+for var in $(env | grep '^AZURE' | awk -F= '{print $1}'); do
+    unset $var
+done
+
 # Check if Python is available
 if ! command -v python &> /dev/null; then
     if ! command -v python3 &> /dev/null; then

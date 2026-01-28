@@ -87,6 +87,34 @@ copy the endpoint of your Azure OpenAI resource and paste it into the value for 
 
 save the .env file
 
+### Authentication Configuration
+
+The accelerator supports two authentication methods for Azure OpenAI:
+
+**1. API Key Authentication (Simplest)**
+- Set `AZURE_OPENAI_API_KEY` in your `.env` file
+- The code will automatically use API key authentication if this variable is set
+- Suitable for development and non-corporate environments
+
+**2. Entra ID (Azure AD) Authentication (Recommended for Corporate Security)**
+- Comment out or remove `AZURE_OPENAI_API_KEY` from your `.env` file
+- Set `AZURE_TENANT_ID` and optionally `AZURE_SUBSCRIPTION_ID` in your `.env` file
+- Authenticate using Azure CLI: `az login --tenant <your-tenant-id>`
+- The code uses `DefaultAzureCredential` which tries multiple authentication methods (Azure CLI, PowerShell, VS Code, etc.)
+- Required for environments with security policies that prohibit API key usage
+
+**Authentication Priority:**
+The code checks for API key first. If found, it uses API key authentication. If not found, it automatically falls back to Entra ID authentication.
+
+**Example .env configuration for Entra ID:**
+```
+AZURE_OPENAI_ENDPOINT="https://your-resource.cognitiveservices.azure.com/"
+# AZURE_OPENAI_API_KEY="commented-out-for-security"
+AZURE_OPENAI_DEPLOYMENT_O1="o1"
+AZURE_TENANT_ID="your-tenant-id-here"
+AZURE_SUBSCRIPTION_ID="your-subscription-id-here"
+```
+
   
 
 Test that your environment is working (Note: this is assuming a Windows OS development environment - for Linux please adapt the paths to use forward / ):

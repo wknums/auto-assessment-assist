@@ -10,7 +10,7 @@ import sys
 import json
 from pathlib import Path
 from openai import AzureOpenAI  
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider  
+from azure.identity import DefaultAzureCredential, AzureCliCredential, get_bearer_token_provider  
 from dotenv import load_dotenv
 import tempfile
 
@@ -37,8 +37,8 @@ def convert_docx_to_md(docx_path, temp_dir):
     Returns the path to the generated markdown file.
     """
     try:
-        from docx import Document
-        from markdownify import markdownify as md
+        from docx import Document  # type: ignore
+        from markdownify import markdownify as md  # type: ignore
     except ImportError:
         print("Please install python-docx and markdownify: pip install python-docx markdownify")
         raise ImportError("Required libraries not found")
@@ -230,6 +230,14 @@ def read_json_template(template_path):
         return None
 
 def main():
+    print("\n" + "="*80)
+    print("🔧 AWREASON.PY EXECUTION STARTED")
+    print("="*80)
+    print(f"Script location: {__file__}")
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Command line args: {sys.argv}")
+    print("="*80)
+    
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Chat with O1 model using text and images')
 
@@ -373,29 +381,109 @@ def main():
     # Cross-platform .env loading
     dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
     dotenv_path = os.path.abspath(os.path.expanduser(dotenv_path))
-    load_dotenv(dotenv_path=dotenv_path, override=True)
+    
+    # Debug: Print .env file loading info
+    print("\n" + "="*60)
+    print(".ENV FILE LOADING DEBUG:")
+    print("="*60)
+    print(f"Looking for .env file at: {dotenv_path}")
+    print(f".env file exists: {os.path.exists(dotenv_path)}")
+    
+    load_dotenv_result = load_dotenv(dotenv_path=dotenv_path, override=True)
+    print(f"load_dotenv() returned: {load_dotenv_result}")
+    
+    # Debug: Show all AZURE_ environment variables
+    print("\nAll AZURE_ environment variables loaded:")
+    azure_vars = {k: v for k, v in os.environ.items() if k.startswith("AZURE_")}
+    for key in sorted(azure_vars.keys()):
+        # Mask sensitive values
+        value = azure_vars[key]
+        if "KEY" in key or "SECRET" in key:
+            value = value[:10] + "..." if len(value) > 10 else "[MASKED]"
+        print(f"  {key} = {value}")
+    print("="*60)
 
     # Retrieve environment variables with defaults
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_O1", "o1")
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    tenant_id = os.getenv("AZURE_TENANT_ID")
+    subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
 
     # Debug: Print assigned environment variables
-    print("Azure OpenAI Endpoint:", endpoint)
-    print("Deployment:", deployment)
+    print("\n" + "="*60)
+    print("Azure OpenAI Configuration Debug Info:")
+    print("="*60)
+    print(f"Azure OpenAI Endpoint: {endpoint}")
+    print(f"Deployment Name: {deployment}")
+    print(f"API Version: {api_version}")
+    print(f"Azure Tenant ID: {tenant_id if tenant_id else 'Not set (using DefaultAzureCredential)'}")
+    print(f"Base URL that will be used: {endpoint}")
+    
+    # Validate configuration
+    if not endpoint:
+        print("ERROR: AZURE_OPENAI_ENDPOINT environment variable is not set!")
+        sys.exit(1)
+    if not deployment:
+        print("ERROR: AZURE_OPENAI_DEPLOYMENT_O1 environment variable is not set!")
+        sys.exit(1)
+    if not api_version:
+        print("ERROR: AZURE_OPENAI_API_VERSION environment variable is not set!")
+        sys.exit(1)
+        
+    print("Configuration validation passed.")
+    print("="*60)
 
+    # Initialize Azure OpenAI client
+    # Use API key authentication if available, otherwise use Entra ID
+    if api_key:
+        print("\n🔑 Using API Key authentication")
+        client = AzureOpenAI(  
+            azure_endpoint=endpoint,  
+            api_key=api_key,  
+            api_version=api_version,  
+        )
+    else:
+        print("\n🔐 Using Entra ID (Azure AD) authentication")
+        cognitiveServicesResource = "https://cognitiveservices.azure.com/"
+        
+        # Ensure Azure CLI path is in the environment PATH
+        az_cli_path = r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin"
+        if az_cli_path not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = az_cli_path + os.pathsep + os.environ.get("PATH", "")
+            print(f"Added Azure CLI to PATH: {az_cli_path}")
+        
+        # Use DefaultAzureCredential which tries multiple authentication methods
+        # It will attempt (in order): Environment, ManagedIdentity, SharedTokenCache, 
+        # VisualStudioCode, AzureCli, AzurePowerShell, AzureDeveloperCli
+        if tenant_id:
+            print(f"Using DefaultAzureCredential with tenant ID: {tenant_id}")
+            print("Will attempt multiple authentication methods (CLI, PowerShell, VSCode, etc.)")
+            # Set environment variables for DefaultAzureCredential
+            os.environ["AZURE_TENANT_ID"] = tenant_id
+            if subscription_id:
+                os.environ["AZURE_SUBSCRIPTION_ID"] = subscription_id
+            credential = DefaultAzureCredential(
+                exclude_visual_studio_code_credential=False,
+                exclude_cli_credential=False,
+                exclude_powershell_credential=False,
+                process_timeout=60  # Increase timeout to 60 seconds
+            )
+        else:
+            print("Using DefaultAzureCredential without tenant ID")
+            credential = DefaultAzureCredential(process_timeout=60)
+        
+        token_provider = get_bearer_token_provider(  
+            credential,  
+            f'{cognitiveServicesResource}.default'  
+        )  
 
-    # Initialize Azure OpenAI client with Entra ID authentication  
-    cognitiveServicesResource = "https://cognitiveservices.azure.com/"
-    token_provider = get_bearer_token_provider(  
-        DefaultAzureCredential(),  
-        f'{cognitiveServicesResource}.default'  
-    )  
-
-    client = AzureOpenAI(  
-        azure_endpoint=endpoint,  
-        azure_ad_token_provider=token_provider,  
-        api_version='2024-12-01-preview',  
-    )
+        client = AzureOpenAI(  
+            azure_endpoint=endpoint,  
+            azure_ad_token_provider=token_provider,  
+            api_version=api_version,  
+        )
     
     # Set up the messages for the chat
     messages = [
@@ -417,7 +505,7 @@ def main():
         )
         
         # Append document explanation to the original prompt
-        prompt_text += document_explanation
+        prompt_text += document_explanation # type: ignore
         print(f"Enhanced prompt with document separation information")
     
     # Add the text prompt
@@ -469,7 +557,7 @@ def main():
     }
     
     # Check API version and adjust parameters accordingly
-    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2023-12-01-preview")
+    print(f"\n📝 CONFIGURING REQUEST PARAMETERS:")
     print(f"Using API version: {api_version}")
     
     # For newer API versions (2024-02-01-preview and later)
@@ -489,12 +577,81 @@ def main():
     
     # Send the request to the o1 model
     print("\nSending request to o1 model...")
+    
+    # Print detailed debugging information before making the API call
+    print("\n" + "="*60)
+    print("API CALL DEBUG INFORMATION")
+    print("="*60)
+    print(f"Model/Deployment: {completion_params['model']}")
+    print(f"API Endpoint: {endpoint}")
+    print(f"API Version: {client._api_version}")
+    print(f"Number of messages: {len(completion_params['messages'])}")
+    print(f"Total images in request: {total_images}")
+    
+    # Print request parameters (excluding image data for brevity)
+    debug_params = completion_params.copy()
+    if 'messages' in debug_params:
+        debug_messages = []
+        for msg in debug_params['messages']:
+            debug_msg = msg.copy()
+            if 'content' in debug_msg and isinstance(debug_msg['content'], list):
+                content_summary = []
+                for item in debug_msg['content']:
+                    if item.get('type') == 'text':
+                        text_preview = item['text'][:100] + ('...' if len(item['text']) > 100 else '')
+                        content_summary.append(f"text: '{text_preview}'")
+                    elif item.get('type') == 'image_url':
+                        content_summary.append("image: [base64 data]")
+                debug_msg['content'] = content_summary
+            debug_messages.append(debug_msg)
+        debug_params['messages'] = debug_messages
+    
+    print(f"Request parameters: {json.dumps(debug_params, indent=2)}")
+    print("="*60)
+    
     try:
         completion = client.chat.completions.create(**completion_params)
     except Exception as e:
-        # If the first attempt fails, try without the potentially problematic parameters
-        print(f"Error in initial request: {e}")
-        print("Retrying with simplified parameters...")
+        # Print comprehensive error information
+        print("\n" + "="*60)
+        print("ERROR DETAILS - FIRST ATTEMPT FAILED")
+        print("="*60)
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Message: {str(e)}")
+        
+        # Check for specific error types and provide detailed diagnostics
+        status_code = getattr(e, 'status_code', None)
+        if status_code:
+            print(f"HTTP Status Code: {status_code}")
+        if hasattr(e, 'response') and getattr(e, 'response', None):
+            response = getattr(e, 'response')  # type: ignore
+            print(f"Response Headers: {dict(response.headers) if hasattr(response, 'headers') else 'N/A'}")
+            try:
+                response_text = response.text if hasattr(response, 'text') else str(response)
+                print(f"Response Body: {response_text}")
+            except:
+                print("Could not read response body")
+        
+        # Provide specific guidance based on error type
+        if "404" in str(e) or "Not Found" in str(e):
+            print("\n🔍 404 ERROR DIAGNOSIS:")
+            print(f"   • Endpoint: {endpoint}")
+            print(f"   • Deployment: {deployment}")
+            print(f"   • API Version: {client._api_version}")
+            print("   • Possible causes:")
+            print("     1. Deployment name is incorrect or doesn't exist")
+            print("     2. API version is not supported for this deployment")
+            print("     3. Endpoint URL is incorrect")
+            print("     4. Deployment is not in the same region as the endpoint")
+            print("     5. You don't have access to this deployment")
+            print("\n💡 Troubleshooting steps:")
+            print("   1. Check Azure Portal for correct deployment name")
+            print("   2. Verify the deployment supports the API version")
+            print("   3. Ensure the deployment is in 'Succeeded' state")
+            print("   4. Check your access permissions")
+            
+        print("\nRetrying with simplified parameters...")
+        print("="*60)
         
         # Create a simplified parameter set (removing reasoning_effort)
         fallback_params = {
@@ -513,20 +670,68 @@ def main():
         if json_template:
             fallback_params["response_format"] = {"type": "json_object"}
         
-        completion = client.chat.completions.create(**fallback_params)
+        # Print fallback parameters
+        print("\nFALLBACK REQUEST DEBUG:")
+        print(f"Fallback parameters: {json.dumps({k: v for k, v in fallback_params.items() if k != 'messages'}, indent=2)}")
+        print(f"Messages count: {len(fallback_params['messages'])}")
+        
+        try:
+            completion = client.chat.completions.create(**fallback_params)
+            print("✅ Fallback request succeeded!")
+        except Exception as fallback_error:
+            print("\n" + "="*60)
+            print("FALLBACK REQUEST ALSO FAILED")
+            print("="*60)
+            print(f"Fallback Error Type: {type(fallback_error).__name__}")
+            print(f"Fallback Error Message: {str(fallback_error)}")
+            
+            if hasattr(fallback_error, 'status_code'):
+                print(f"Fallback HTTP Status Code: {getattr(fallback_error, 'status_code')}")
+            if hasattr(fallback_error, 'response') and getattr(fallback_error, 'response', None):
+                try:
+                    response = getattr(fallback_error, 'response')  # type: ignore
+                    response_text = response.text if hasattr(response, 'text') else str(response)
+                    print(f"Fallback Response Body: {response_text}")
+                except:
+                    print("Could not read fallback response body")
+            
+            # Check for specific error patterns
+            if "tenant" in str(fallback_error).lower():
+                print("\n🚨 TENANT AUTHENTICATION ISSUE DETECTED!")
+                print("Please check your Azure authentication:")
+                print("1. Run 'az account show' to see current subscription")
+                print("2. Run 'az account list' to see all available subscriptions")
+                print("3. Run 'az account set --subscription <correct-subscription-id>'")
+                print("4. Ensure your Azure OpenAI resource is in the same tenant")
+            
+            print("\n❌ Both primary and fallback requests failed.")
+            print("Please check your Azure OpenAI configuration and authentication.")
+            print("="*60)
+            raise Exception(f"Both API attempts failed. Primary: {str(e)}, Fallback: {str(fallback_error)}")
 
+    # Success logging
+    print("\n✅ API REQUEST SUCCESSFUL!")
+    print("="*60)
+    
     # Get the response content
     response_content = completion.choices[0].message.content
     
-    # Extract and report token usage
+    # Extract and report token usage and response details
     prompt_tokens = completion.usage.prompt_tokens
     completion_tokens = completion.usage.completion_tokens
     total_tokens = completion.usage.total_tokens
+    
+    print(f"Response Details:")
+    print(f"  Model used: {completion.model}")
+    print(f"  Response ID: {completion.id}")
+    print(f"  Finish reason: {completion.choices[0].finish_reason}")
+    print(f"  Response length: {len(response_content)} characters")
     
     print(f"\nToken Usage Summary:")
     print(f"  Input tokens:  {prompt_tokens:,}")
     print(f"  Output tokens: {completion_tokens:,}")
     print(f"  Total tokens:  {total_tokens:,}")
+    print("="*60)
     
     # Print the response
     print("\nO1 Response:")
@@ -557,4 +762,58 @@ def main():
             print(f"Warning: Could not clean up temporary directory {temp_dir}: {e}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"\n{'='*80}")
+        print("💥 UNHANDLED ERROR OCCURRED")
+        print(f"{'='*80}")
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Message: {str(e)}")
+        
+        # Print the full traceback
+        import traceback
+        print(f"\n📋 Full Traceback:")
+        traceback.print_exc()
+        
+        print(f"\n{'='*80}")
+        print("🔍 ENVIRONMENT DEBUGGING INFO")
+        print(f"{'='*80}")
+        
+        # Print environment variables for debugging
+        print(f"AZURE_OPENAI_ENDPOINT: {os.getenv('AZURE_OPENAI_ENDPOINT', 'NOT SET')}")
+        print(f"AZURE_OPENAI_DEPLOYMENT_O1: {os.getenv('AZURE_OPENAI_DEPLOYMENT_O1', 'NOT SET')}")
+        print(f"AZURE_OPENAI_API_VERSION: {os.getenv('AZURE_OPENAI_API_VERSION', 'NOT SET (will use default)')}")
+        
+        # Print Python and OpenAI library versions
+        print(f"\n🐍 Python Version: {sys.version}")
+        try:
+            import openai
+            print(f"📦 OpenAI Library Version: {openai.__version__}")
+        except:
+            print("📦 OpenAI Library Version: Could not determine")
+            
+        print(f"\n📂 Current Working Directory: {os.getcwd()}")
+        print(f"📄 Script Location: {os.path.abspath(__file__)}")
+        
+        # Check Azure CLI status
+        print(f"\n☁️ AZURE AUTHENTICATION STATUS:")
+        try:
+            import subprocess
+            result = subprocess.run(['az', 'account', 'show'], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                print("✅ Azure CLI authenticated")
+                print(f"Current account info: {result.stdout[:200]}...")
+            else:
+                print("❌ Azure CLI not authenticated or error occurred")
+                print(f"Error: {result.stderr}")
+        except Exception as cli_error:
+            print(f"❌ Could not check Azure CLI status: {cli_error}")
+        
+        print(f"\n{'='*80}")
+        print("🚨 For tenant mismatch errors, try:")
+        print("   az account list")
+        print("   az account set --subscription <correct-subscription-id>")
+        print("   az login --tenant <correct-tenant-id>")
+        print(f"{'='*80}")
+        sys.exit(1)

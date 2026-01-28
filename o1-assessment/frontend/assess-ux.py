@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 import base64
 import json
@@ -710,11 +711,172 @@ def main():
         # Setup an output directory for results
         st.markdown("<h2 class='section-header'>3. Set Output Directory</h2>", unsafe_allow_html=True)
         
-        output_dir = st.text_input(
-            "Output Directory", 
-            value=str(O1_ASSESSMENT_DIR / "grading_results"),
-            help="Directory where assessment results will be saved."
-        )
+        # Default output directory
+        default_output_dir = str(O1_ASSESSMENT_DIR / "grading_results")
+        
+        # Initialize session state for output directory if not exists
+        if 'assessment_output_directory' not in st.session_state:
+            st.session_state.assessment_output_directory = default_output_dir
+        if 'assessment_current_browse_path' not in st.session_state:
+            st.session_state.assessment_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
+        
+        col1, col2 = st.columns([4, 1])
+        
+        with col1:
+            # Display current directory selection
+            st.text_input(
+                "Selected Output Directory",
+                value=st.session_state.assessment_output_directory,
+                disabled=True,
+                key="assessment_output_dir_display",
+                help="Directory where assessment results will be saved. Use the Browse button to change."
+            )
+        
+        with col2:
+            # Folder browser button
+            st.markdown("<br>", unsafe_allow_html=True)  # Add spacing to align with text input
+            if st.button("📁 Browse", use_container_width=True, key="browse_assessment_output"):
+                st.session_state.show_assessment_folder_browser = True
+        
+        # Folder browser interface
+        if st.session_state.get('show_assessment_folder_browser', False):
+            with st.expander("📁 Folder Browser", expanded=True):
+                # Current path display and navigation
+                current_path = Path(st.session_state.assessment_current_browse_path)
+                
+                # Navigation header
+                st.markdown(f"**Current Location:** `{current_path}`")
+                
+                nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 2])
+                
+                with nav_col1:
+                    # Up one level button
+                    if st.button("⬆️ Up", use_container_width=True, key="assessment_nav_up"):
+                        parent_path = current_path.parent
+                        if parent_path != current_path:  # Not at root
+                            st.session_state.assessment_current_browse_path = str(parent_path)
+                            st.rerun()
+                
+                with nav_col2:
+                    # Project folder button
+                    if st.button("📁 Project", use_container_width=True, key="assessment_nav_project"):
+                        st.session_state.assessment_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
+                        st.rerun()
+                
+                with nav_col3:
+                    # New folder creation
+                    new_folder_name = st.text_input("Create new folder:", key="assessment_new_folder_name", placeholder="Enter folder name")
+                    if new_folder_name and st.button("📁 Create", key="assessment_create_folder"):
+                        new_folder_path = current_path / new_folder_name
+                        try:
+                            new_folder_path.mkdir(exist_ok=True)
+                            st.success(f"✅ Created folder: {new_folder_name}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error creating folder: {e}")
+                
+                st.markdown("---")
+                
+                # List directories in current path
+                try:
+                    if current_path.exists():
+                        # Get directories only
+                        dirs = [d for d in current_path.iterdir() if d.is_dir()]
+                        dirs.sort(key=lambda x: x.name.lower())
+                        
+                        if dirs:
+                            st.markdown("**📁 Folders:**")
+                            
+                            # Create a grid layout for folders
+                            cols_per_row = 3
+                            for i in range(0, len(dirs), cols_per_row):
+                                cols = st.columns(cols_per_row)
+                                for j, col in enumerate(cols):
+                                    if i + j < len(dirs):
+                                        folder = dirs[i + j]
+                                        with col:
+                                            if st.button(f"📁 {folder.name}", use_container_width=True, key=f"assessment_folder_{i+j}"):
+                                                st.session_state.assessment_current_browse_path = str(folder)
+                                                st.rerun()
+                        else:
+                            st.info("📂 No folders found in this directory")
+                    else:
+                        st.error(f"❌ Directory does not exist: {current_path}")
+                        # Reset to project directory
+                        st.session_state.assessment_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
+                        st.rerun()
+                
+                except Exception as e:
+                    st.error(f"❌ Error reading directory: {e}")
+                    st.session_state.assessment_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
+                    st.rerun()
+                
+                st.markdown("---")
+                
+                # Action buttons
+                action_col1, action_col2, action_col3 = st.columns(3)
+                
+                with action_col1:
+                    if st.button("✅ Select This Folder", use_container_width=True, key="assessment_select_folder"):
+                        st.session_state.assessment_output_directory = str(current_path)
+                        st.session_state.show_assessment_folder_browser = False
+                        st.success(f"✅ Selected: {current_path}")
+                        st.rerun()
+                
+                with action_col2:
+                    # Manual path input
+                    if st.button("✏️ Enter Path Manually", use_container_width=True, key="assessment_manual_path"):
+                        st.session_state.show_assessment_manual_input = True
+                
+                with action_col3:
+                    if st.button("❌ Cancel", use_container_width=True, key="assessment_cancel_browse"):
+                        st.session_state.show_assessment_folder_browser = False
+                        st.rerun()
+                
+                # Manual path input section
+                if st.session_state.get('show_assessment_manual_input', False):
+                    st.markdown("---")
+                    st.markdown("**✏️ Manual Path Entry:**")
+                    manual_path = st.text_input(
+                        "Enter directory path:",
+                        value=str(current_path),
+                        key="assessment_manual_path_input"
+                    )
+                    
+                    manual_col1, manual_col2 = st.columns(2)
+                    with manual_col1:
+                        if st.button("✅ Use This Path", use_container_width=True, key="assessment_use_manual_path"):
+                            if manual_path.strip():
+                                manual_path_obj = Path(manual_path.strip())
+                                if manual_path_obj.exists():
+                                    st.session_state.assessment_output_directory = str(manual_path_obj)
+                                    st.session_state.show_assessment_folder_browser = False
+                                    st.session_state.show_assessment_manual_input = False
+                                    st.success(f"✅ Selected: {manual_path_obj}")
+                                    st.rerun()
+                                else:
+                                    # Ask if user wants to create the directory
+                                    if st.button("📁 Create & Use This Path", use_container_width=True, key="assessment_create_manual_path"):
+                                        try:
+                                            manual_path_obj.mkdir(parents=True, exist_ok=True)
+                                            st.session_state.assessment_output_directory = str(manual_path_obj)
+                                            st.session_state.show_assessment_folder_browser = False
+                                            st.session_state.show_assessment_manual_input = False
+                                            st.success(f"✅ Created and selected: {manual_path_obj}")
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error(f"❌ Error creating directory: {e}")
+                                    st.warning(f"⚠️ Directory does not exist: {manual_path}")
+                            else:
+                                st.error("Please enter a valid directory path")
+                    
+                    with manual_col2:
+                        if st.button("❌ Cancel Manual Entry", use_container_width=True, key="assessment_cancel_manual"):
+                            st.session_state.show_assessment_manual_input = False
+                            st.rerun()
+        
+        # Get the current output directory
+        output_dir = st.session_state.assessment_output_directory
         
         # Create a run button
         run_button_disabled = not (prompt_file and (uploaded_pdfs or uploaded_images or uploaded_context))
@@ -810,8 +972,22 @@ def main():
             key="batch_json_template"
         )
         
+        # Reference file (optional)
+        st.markdown("### 3. Upload Reference Document (Optional)")
+        st.info("📖 Upload a single reference file (.pdf, .docx, .md, .txt) that will be used as context in the main prompt for scoring all other documents against.")
+        batch_reference_file = st.file_uploader(
+            "Upload reference document (.pdf, .docx, .md, .txt)", 
+            type=["pdf", "docx", "md", "txt"],
+            help="Optional: This reference document will be included in the prompt as the standard against which all other documents will be assessed.",
+            key="batch_reference_file"
+        )
+        
+        if batch_reference_file:
+            ref_type = "📑 PDF" if batch_reference_file.name.lower().endswith('.pdf') else "📄 DOCX" if batch_reference_file.name.lower().endswith('.docx') else "📝 Text"
+            st.success(f"✅ Reference file uploaded: {ref_type} - {batch_reference_file.name}")
+        
         # Upload multiple documents
-        st.markdown("### 3. Upload Documents (.docx or .pdf)")
+        st.markdown("### 4. Upload Documents (.docx or .pdf)")
         batch_doc_files = st.file_uploader(
             "Upload .docx or .pdf files for batch processing",
             type=["docx", "pdf"],
@@ -829,14 +1005,175 @@ def main():
                     file_type = "📄 DOCX" if f.name.lower().endswith('.docx') else "📑 PDF"
                     st.write(f"{idx}. {file_type} - {f.name}")
         
-        # Output directory
-        st.markdown("### 4. Set Output Directory")
-        batch_output_dir = st.text_input(
-            "Batch Output Directory", 
-            value=str(O1_ASSESSMENT_DIR / "batch_results"),
-            help="Directory where all batch results will be saved.",
-            key="batch_output_dir"
-        )
+        # Output directory with folder browser
+        st.markdown("### 5. Set Output Directory")
+        
+        # Default output directory
+        default_batch_dir = str(O1_ASSESSMENT_DIR / "batch_results")
+        
+        # Initialize session state for batch output directory if not exists
+        if 'batch_output_directory' not in st.session_state:
+            st.session_state.batch_output_directory = default_batch_dir
+        if 'batch_current_browse_path' not in st.session_state:
+            st.session_state.batch_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
+        
+        col1, col2 = st.columns([4, 1])
+        
+        with col1:
+            # Display current directory selection
+            st.text_input(
+                "Selected Output Directory",
+                value=st.session_state.batch_output_directory,
+                disabled=True,
+                key="batch_output_dir_display",
+                help="Directory where all batch results will be saved. Use the Browse button to change."
+            )
+        
+        with col2:
+            # Folder browser button
+            st.markdown("<br>", unsafe_allow_html=True)  # Add spacing to align with text input
+            if st.button("📁 Browse", use_container_width=True, key="browse_batch_output"):
+                st.session_state.show_batch_folder_browser = True
+        
+        # Folder browser interface
+        if st.session_state.get('show_batch_folder_browser', False):
+            with st.expander("📁 Folder Browser", expanded=True):
+                # Current path display and navigation
+                current_path = Path(st.session_state.batch_current_browse_path)
+                
+                # Navigation header
+                st.markdown(f"**Current Location:** `{current_path}`")
+                
+                nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 2])
+                
+                with nav_col1:
+                    # Up one level button
+                    if st.button("⬆️ Up", use_container_width=True, key="batch_nav_up"):
+                        parent_path = current_path.parent
+                        if parent_path != current_path:  # Not at root
+                            st.session_state.batch_current_browse_path = str(parent_path)
+                            st.rerun()
+                
+                with nav_col2:
+                    # Project folder button
+                    if st.button("📁 Project", use_container_width=True, key="batch_nav_project"):
+                        st.session_state.batch_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
+                        st.rerun()
+                
+                with nav_col3:
+                    # New folder creation
+                    new_folder_name = st.text_input("Create new folder:", key="batch_new_folder_name", placeholder="Enter folder name")
+                    if new_folder_name and st.button("📁 Create", key="batch_create_folder"):
+                        new_folder_path = current_path / new_folder_name
+                        try:
+                            new_folder_path.mkdir(exist_ok=True)
+                            st.success(f"✅ Created folder: {new_folder_name}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error creating folder: {e}")
+                
+                st.markdown("---")
+                
+                # List directories in current path
+                try:
+                    if current_path.exists():
+                        # Get directories only
+                        dirs = [d for d in current_path.iterdir() if d.is_dir()]
+                        dirs.sort(key=lambda x: x.name.lower())
+                        
+                        if dirs:
+                            st.markdown("**📁 Folders:**")
+                            
+                            # Create a grid layout for folders
+                            cols_per_row = 3
+                            for i in range(0, len(dirs), cols_per_row):
+                                cols = st.columns(cols_per_row)
+                                for j, col in enumerate(cols):
+                                    if i + j < len(dirs):
+                                        folder = dirs[i + j]
+                                        with col:
+                                            if st.button(f"📁 {folder.name}", use_container_width=True, key=f"batch_folder_{i+j}"):
+                                                st.session_state.batch_current_browse_path = str(folder)
+                                                st.rerun()
+                        else:
+                            st.info("📂 No folders found in this directory")
+                    else:
+                        st.error(f"❌ Directory does not exist: {current_path}")
+                        # Reset to project directory
+                        st.session_state.batch_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
+                        st.rerun()
+                
+                except Exception as e:
+                    st.error(f"❌ Error reading directory: {e}")
+                    st.session_state.batch_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
+                    st.rerun()
+                
+                st.markdown("---")
+                
+                # Action buttons
+                action_col1, action_col2, action_col3 = st.columns(3)
+                
+                with action_col1:
+                    if st.button("✅ Select This Folder", use_container_width=True, key="batch_select_folder"):
+                        st.session_state.batch_output_directory = str(current_path)
+                        st.session_state.show_batch_folder_browser = False
+                        st.success(f"✅ Selected: {current_path}")
+                        st.rerun()
+                
+                with action_col2:
+                    # Manual path input
+                    if st.button("✏️ Enter Path Manually", use_container_width=True, key="batch_manual_path"):
+                        st.session_state.show_batch_manual_input = True
+                
+                with action_col3:
+                    if st.button("❌ Cancel", use_container_width=True, key="batch_cancel_browse"):
+                        st.session_state.show_batch_folder_browser = False
+                        st.rerun()
+                
+                # Manual path input section
+                if st.session_state.get('show_batch_manual_input', False):
+                    st.markdown("---")
+                    st.markdown("**✏️ Manual Path Entry:**")
+                    manual_path = st.text_input(
+                        "Enter directory path:",
+                        value=str(current_path),
+                        key="batch_manual_path_input"
+                    )
+                    
+                    manual_col1, manual_col2 = st.columns(2)
+                    with manual_col1:
+                        if st.button("✅ Use This Path", use_container_width=True, key="batch_use_manual_path"):
+                            if manual_path.strip():
+                                manual_path_obj = Path(manual_path.strip())
+                                if manual_path_obj.exists():
+                                    st.session_state.batch_output_directory = str(manual_path_obj)
+                                    st.session_state.show_batch_folder_browser = False
+                                    st.session_state.show_batch_manual_input = False
+                                    st.success(f"✅ Selected: {manual_path_obj}")
+                                    st.rerun()
+                                else:
+                                    # Ask if user wants to create the directory
+                                    if st.button("📁 Create & Use This Path", use_container_width=True, key="batch_create_manual_path"):
+                                        try:
+                                            manual_path_obj.mkdir(parents=True, exist_ok=True)
+                                            st.session_state.batch_output_directory = str(manual_path_obj)
+                                            st.session_state.show_batch_folder_browser = False
+                                            st.session_state.show_batch_manual_input = False
+                                            st.success(f"✅ Created and selected: {manual_path_obj}")
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error(f"❌ Error creating directory: {e}")
+                                    st.warning(f"⚠️ Directory does not exist: {manual_path}")
+                            else:
+                                st.error("Please enter a valid directory path")
+                    
+                    with manual_col2:
+                        if st.button("❌ Cancel Manual Entry", use_container_width=True, key="batch_cancel_manual"):
+                            st.session_state.show_batch_manual_input = False
+                            st.rerun()
+        
+        # Get the current batch output directory
+        batch_output_dir = st.session_state.batch_output_directory
         
         # Run batch processing button
         batch_run_disabled = not (batch_prompt_file and batch_doc_files)
@@ -844,7 +1181,7 @@ def main():
         if batch_run_disabled:
             st.warning("Please upload a prompt file and at least one document file (.docx or .pdf) to start batch processing.")
         
-        st.markdown("### 5. Run Batch Processing")
+        st.markdown("### 6. Run Batch Processing")
         batch_col1, batch_col2 = st.columns([3, 1])
         with batch_col1:
             run_batch_button = st.button(
@@ -898,6 +1235,18 @@ def main():
                     console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                 else:
                     console_log += "No JSON template provided - output will be in HTML format\n"
+                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                
+                # Save reference file if provided
+                batch_reference_path = None
+                if batch_reference_file:
+                    batch_reference_path = temp_dir_path / batch_reference_file.name
+                    with open(batch_reference_path, "wb") as f:
+                        f.write(batch_reference_file.getbuffer())
+                    console_log += f"Saved reference file: {batch_reference_file.name}\n"
+                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                else:
+                    console_log += "No reference file provided\n"
                     console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                 
                 # Create output directory
@@ -982,11 +1331,48 @@ def main():
                             "--promptfile", str(batch_prompt_path)
                         ]
                         
-                        # Add PDF or markdown file
+                        # Add reference file first if provided (as primary document)
+                        ref_is_pdf = False
+                        if batch_reference_path:
+                            ref_name_lower = batch_reference_file.name.lower()
+                            if ref_name_lower.endswith('.pdf'):
+                                cmd_analyze.extend(["--pdf_file1", str(batch_reference_path)])
+                                ref_is_pdf = True
+                            else:
+                                # For .docx, .md, .txt files, treat as markdown/context
+                                cmd_analyze.extend(["--md_file", str(batch_reference_path)])
+                        
+                        # Add the document being analyzed
                         if is_pdf:
-                            cmd_analyze.extend(["--pdf_file1", str(pdf_path)])
+                            if ref_is_pdf:
+                                # Reference is PDF, current doc is second PDF
+                                cmd_analyze.extend(["--pdf_file2", str(pdf_path)])
+                            else:
+                                # No PDF reference or reference is text, current doc is first PDF
+                                cmd_analyze.extend(["--pdf_file1", str(pdf_path)])
                         else:
-                            cmd_analyze.extend(["--md_file", str(md_path)])
+                            # Current document is markdown
+                            if not batch_reference_path or ref_is_pdf:
+                                # No reference or reference is PDF, current doc goes as md_file
+                                cmd_analyze.extend(["--md_file", str(md_path)])
+                            else:
+                                # Reference is already in md_file, need to combine or use second slot
+                                # For simplicity, we'll append the current doc content to a combined md file
+                                combined_md_path = temp_dir_path / f"combined_context_{idx}.md"
+                                with open(batch_reference_path, 'r', encoding='utf-8') as ref_f:
+                                    ref_content = ref_f.read()
+                                with open(md_path, 'r', encoding='utf-8') as doc_f:
+                                    doc_content = doc_f.read()
+                                
+                                combined_content = f"# Reference Document\n\n{ref_content}\n\n# Document to Assess\n\n{doc_content}"
+                                with open(combined_md_path, 'w', encoding='utf-8') as combined_f:
+                                    combined_f.write(combined_content)
+                                
+                                cmd_analyze = [
+                                    sys.executable, str(awreason_path),
+                                    "--promptfile", str(batch_prompt_path),
+                                    "--md_file", str(combined_md_path)
+                                ]
                         
                         # Add JSON template if provided
                         if batch_json_path:
@@ -995,20 +1381,137 @@ def main():
                         # Add output file
                         cmd_analyze.extend(["--output", str(output_file_path)])
                         
-                        result = subprocess.run(cmd_analyze, capture_output=True, text=True, cwd=str(O1_ASSESSMENT_DIR))
-                        console_log += result.stdout
-                        if result.stderr:
-                            console_log += result.stderr
-                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                        # Execute analysis with retry logic and error handling
+                        max_retries = 3
+                        retry_count = 0
+                        analysis_success = False
+                        last_error_output = ""
                         
-                        if result.returncode != 0:
+                        while retry_count <= max_retries and not analysis_success:
+                            try:
+                                # Check for existing output file and handle conflict
+                                if output_file_path.exists():
+                                    # Rename existing file with _prev suffix
+                                    prev_file_path = output_file_path.with_stem(f"{output_file_path.stem}_prev")
+                                    counter = 1
+                                    while prev_file_path.exists():
+                                        prev_file_path = output_file_path.with_stem(f"{output_file_path.stem}_prev{counter}")
+                                        counter += 1
+                                    
+                                    output_file_path.rename(prev_file_path)
+                                    console_log += f"Renamed existing file to: {prev_file_path.name}\n"
+                                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                
+                                # Run the analysis with timeout
+                                result = subprocess.run(
+                                    cmd_analyze, 
+                                    capture_output=True, 
+                                    text=True, 
+                                    cwd=str(O1_ASSESSMENT_DIR),
+                                    timeout=300  # 5 minute timeout
+                                )
+                                
+                                # Capture all output for analysis
+                                full_output = ""
+                                if result.stdout:
+                                    full_output += result.stdout
+                                if result.stderr:
+                                    full_output += result.stderr
+                                
+                                console_log += full_output
+                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                last_error_output = full_output
+                                
+                                if result.returncode == 0:
+                                    analysis_success = True
+                                    break
+                                else:
+                                    # Analyze the error type for retry logic
+                                    error_lower = full_output.lower()
+                                    should_retry = False
+                                    
+                                    # Check for retryable errors
+                                    retryable_errors = [
+                                        "429", "rate limit", "too many requests",
+                                        "connection", "timeout", "network", 
+                                        "502", "503", "504", "bad gateway",
+                                        "service unavailable", "gateway timeout",
+                                        "temporary failure", "try again"
+                                    ]
+                                    
+                                    for error_pattern in retryable_errors:
+                                        if error_pattern in error_lower:
+                                            should_retry = True
+                                            break
+                                    
+                                    if should_retry and retry_count < max_retries:
+                                        retry_count += 1
+                                        wait_time = 10 * retry_count  # Increasing wait time: 10s, 20s, 30s
+                                        console_log += f"Retryable error detected. Waiting {wait_time} seconds before retry {retry_count}/{max_retries}...\n"
+                                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                        time.sleep(wait_time)
+                                        continue
+                                    else:
+                                        # Non-retryable error or max retries exceeded
+                                        break
+                            
+                            except subprocess.TimeoutExpired:
+                                retry_count += 1
+                                last_error_output = f"Process timeout after 5 minutes"
+                                console_log += f"Process timeout. Retry {retry_count}/{max_retries}...\n"
+                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                if retry_count <= max_retries:
+                                    time.sleep(10)
+                                    continue
+                                else:
+                                    break
+                            
+                            except Exception as subprocess_error:
+                                last_error_output = f"Subprocess execution error: {subprocess_error}"
+                                console_log += f"{last_error_output}\n"
+                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                break
+                        
+                        if not analysis_success:
+                            # Determine error reason from the collected output
+                            error_output = last_error_output
+                            error_lower = error_output.lower()
+                            
+                            if any(pattern in error_lower for pattern in ["429", "rate limit", "too many requests"]):
+                                error_reason = f"Rate limiting error after {max_retries} retries"
+                            elif any(pattern in error_lower for pattern in ["connection", "network"]):
+                                error_reason = "Network connection error"
+                            elif any(pattern in error_lower for pattern in ["timeout", "timed out"]):
+                                error_reason = "Request/Process timeout"
+                            elif any(pattern in error_lower for pattern in ["502", "503", "504", "bad gateway", "service unavailable"]):
+                                error_reason = "Server error (502/503/504)"
+                            elif "filenotfounderror" in error_lower:
+                                error_reason = "Required file not found"
+                            elif "permissionerror" in error_lower:
+                                error_reason = "Permission denied"
+                            elif "openai" in error_lower and "api" in error_lower:
+                                error_reason = "OpenAI API error"
+                            elif "authentication" in error_lower or "unauthorized" in error_lower:
+                                error_reason = "Authentication error"
+                            elif "quota" in error_lower or "billing" in error_lower:
+                                error_reason = "Quota/Billing error"
+                            else:
+                                error_reason = "Analysis processing error"
+                            
                             error_msg = f"ERROR: Failed to analyze {doc_file.name}\n"
+                            error_msg += f"Reason: {error_reason}\n"
+                            error_msg += f"Attempts: {retry_count + 1}\n"
+                            error_msg += f"Details: {error_output[:500]}...\n" if len(error_output) > 500 else f"Details: {error_output}\n"
+                            
                             console_log += error_msg
                             console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                            
                             batch_results.append({
                                 'file': doc_file.name,
                                 'status': 'failed',
-                                'error': 'Analysis failed',
+                                'error': error_reason,
+                                'details': error_output[:1000] if error_output else "No error details available",
+                                'attempts': retry_count + 1,
                                 'output': None
                             })
                             continue
@@ -1033,7 +1536,8 @@ def main():
                         batch_results.append({
                             'file': doc_file.name,
                             'status': 'failed',
-                            'error': str(e),
+                            'error': f"Processing exception: {type(e).__name__}",
+                            'details': str(e),
                             'output': None
                         })
                 
@@ -1090,6 +1594,9 @@ def main():
                             )
                     else:
                         st.error(f"Processing failed: {result.get('error', 'Unknown error')}")
+                        if 'details' in result:
+                            st.markdown("**📋 Error Details:**")
+                            st.code(result['details'], language='text')
     
     with tab4:
         st.markdown("<h2 class='section-header'>Chat Assistant</h2>", unsafe_allow_html=True)

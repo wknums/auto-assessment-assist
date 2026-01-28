@@ -3,6 +3,9 @@
 
 Write-Host "Starting AWReason Frontend..." -ForegroundColor Green
 
+# remove any Azure-related environment variables to avoid conflicts
+Get-ChildItem Env:AZURE* | Remove-Item
+
 # Get the script's directory (root folder)
 $rootDir = $PSScriptRoot
 if (-not $rootDir) {
