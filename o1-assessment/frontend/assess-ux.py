@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import statistics
 from pathlib import Path
 import base64
 import json
@@ -918,8 +919,96 @@ def main():
         st.warning("⚠️ **Beta Feature**: This batch processing capability has not been fully tested. Please verify results carefully.")
         st.info("Upload multiple .docx or .pdf files and process them all at once using a common prompt and optional JSON template.")
         
+        # Multi-run configuration
+        st.markdown("### 1. Multi-Run Configuration (Optional)")
+        st.info("🔄 Run each assessment multiple times and aggregate results to minimize AI scoring variance.")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            num_runs_per_doc = st.number_input(
+                "Runs per document",
+                min_value=1,
+                max_value=10,
+                value=1,
+                help="Number of times to assess each document. Use 3-5 runs for robust scoring with minimal variance."
+            )
+        
+        with col2:
+            enable_aggregation = st.checkbox(
+                "Enable aggregation",
+                value=False,
+                disabled=(num_runs_per_doc == 1),
+                help="Aggregate multiple runs to get a single, variance-minimized score (only available when runs > 1)"
+            )
+        
+        if num_runs_per_doc > 1:
+            col3, col4 = st.columns(2)
+            with col3:
+                aggregation_method = st.selectbox(
+                    "Aggregation method",
+                    options=['median', 'mean', 'trimmed_mean', 'interquartile_mean'],
+                    index=0,
+                    help="Median is most robust against outliers (recommended)",
+                    disabled=not enable_aggregation
+                )
+            with col4:
+                show_variance_analysis = st.checkbox(
+                    "Show variance analysis",
+                    value=True,
+                    disabled=not enable_aggregation,
+                    help="Include variance metrics in results to assess scoring consistency"
+                )
+            
+            # Consolidated results file option
+            col5, col6 = st.columns(2)
+            with col5:
+                create_total_file = st.checkbox(
+                    "Create consolidated results file",
+                    value=True,
+                    disabled=not enable_aggregation,
+                    help="Create batch_aggregated_total.json with all results and batch statistics"
+                )
+            with col6:
+                apply_normalization = st.checkbox(
+                    "Apply statistical normalization",
+                    value=False,
+                    disabled=not enable_aggregation,
+                    help="Normalize scores across batch to correct systematic bias"
+                )
+            
+            # Normalization settings
+            if apply_normalization and enable_aggregation:
+                st.markdown("**Normalization Settings:**")
+                norm_col1, norm_col2 = st.columns(2)
+                with norm_col1:
+                    normalization_method = st.selectbox(
+                        "Normalization method",
+                        options=['linear', 'z_score', 'min_max'],
+                        index=0,
+                        help="Linear: simple shift; Z-score: standardize to target mean/std; Min-max: scale to 0-100"
+                    )
+                with norm_col2:
+                    target_mean = st.number_input(
+                        "Target mean score",
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=70.0,
+                        step=1.0,
+                        help="Expected mean score for normalization"
+                    )
+            else:
+                normalization_method = 'linear'
+                target_mean = 70.0
+        else:
+            aggregation_method = 'median'
+            show_variance_analysis = False
+            create_total_file = False
+            apply_normalization = False
+            normalization_method = 'linear'
+            target_mean = 70.0
+        
         # Batch prompt file
-        st.markdown("### 1. Upload Assessment Prompt")
+        st.markdown("### 2. Upload Assessment Prompt")
         batch_prompt_file = st.file_uploader(
             "Upload prompt file for batch processing (.txt, .md)", 
             type=["txt", "md"],
@@ -964,7 +1053,7 @@ def main():
             st.session_state.batch_edited_prompt = None
         
         # JSON template (optional)
-        st.markdown("### 2. Upload JSON Template (Optional)")
+        st.markdown("### 3. Upload JSON Template (Optional)")
         batch_json_template = st.file_uploader(
             "Upload common JSON template (.json)", 
             type=["json"],
@@ -973,7 +1062,7 @@ def main():
         )
         
         # Reference file (optional)
-        st.markdown("### 3. Upload Reference Document (Optional)")
+        st.markdown("### 4. Upload Reference Document (Optional)")
         st.info("📖 Upload a single reference file (.pdf, .docx, .md, .txt) that will be used as context in the main prompt for scoring all other documents against.")
         batch_reference_file = st.file_uploader(
             "Upload reference document (.pdf, .docx, .md, .txt)", 
@@ -987,7 +1076,7 @@ def main():
             st.success(f"✅ Reference file uploaded: {ref_type} - {batch_reference_file.name}")
         
         # Upload multiple documents
-        st.markdown("### 4. Upload Documents (.docx or .pdf)")
+        st.markdown("### 5. Upload Documents (.docx or .pdf)")
         batch_doc_files = st.file_uploader(
             "Upload .docx or .pdf files for batch processing",
             type=["docx", "pdf"],
@@ -1006,7 +1095,7 @@ def main():
                     st.write(f"{idx}. {file_type} - {f.name}")
         
         # Output directory with folder browser
-        st.markdown("### 5. Set Output Directory")
+        st.markdown("### 6. Set Output Directory")
         
         # Default output directory
         default_batch_dir = str(O1_ASSESSMENT_DIR / "batch_results")
@@ -1181,7 +1270,12 @@ def main():
         if batch_run_disabled:
             st.warning("Please upload a prompt file and at least one document file (.docx or .pdf) to start batch processing.")
         
-        st.markdown("### 6. Run Batch Processing")
+        # Show multi-run summary
+        if num_runs_per_doc > 1:
+            st.info(f"📊 Each document will be assessed **{num_runs_per_doc} times**. " + 
+                   (f"Results will be **aggregated using {aggregation_method}** method." if enable_aggregation else "Individual run results will be saved separately."))
+        
+        st.markdown("### 7. Run Batch Processing")
         batch_col1, batch_col2 = st.columns([3, 1])
         with batch_col1:
             run_batch_button = st.button(
@@ -1207,6 +1301,10 @@ def main():
             console_output_batch = st.empty()
             
             console_log = "Starting batch processing...\n"
+            if num_runs_per_doc > 1:
+                console_log += f"Multi-run mode: {num_runs_per_doc} runs per document\n"
+                if enable_aggregation:
+                    console_log += f"Aggregation: Enabled ({aggregation_method} method)\n"
             console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
             
             # Create temporary directory
@@ -1263,12 +1361,18 @@ def main():
                     
                     progress = idx / total_files
                     progress_bar.progress(progress)
-                    status_text.info(f"Processing {idx}/{total_files}: {doc_file.name}")
+                    status_text.info(f"Processing {idx}/{total_files}: {doc_file.name}" + 
+                                   (f" ({num_runs_per_doc} runs)" if num_runs_per_doc > 1 else ""))
                     
                     console_log += f"\n{'='*60}\n"
                     console_log += f"Processing file {idx}/{total_files}: {doc_file.name} ({'PDF' if is_pdf else 'DOCX'})\n"
+                    if num_runs_per_doc > 1:
+                        console_log += f"Multi-run mode: {num_runs_per_doc} runs per document\n"
                     console_log += f"{'='*60}\n"
                     console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                    
+                    # Track run files for potential aggregation
+                    run_files_list = []
                     
                     try:
                         # Save document file
@@ -1317,218 +1421,315 @@ def main():
                             console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                             pdf_path = doc_path
                         
-                        # Step 2: Run analysis
+                        # Step 2: Run analysis (potentially multiple times)
                         output_ext = ".json" if batch_json_path else ".html"
-                        output_file_name = f"{file_base_name}-analysis{output_ext}"
-                        output_file_path = Path(batch_output_dir) / output_file_name
                         
                         console_log += f"Step 2: Running analysis...\n"
+                        if num_runs_per_doc > 1:
+                            console_log += f"Will perform {num_runs_per_doc} independent runs\n"
                         console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                         
-                        awreason_path = REPO_ROOT / "awreason.py"
-                        cmd_analyze = [
-                            sys.executable, str(awreason_path),
-                            "--promptfile", str(batch_prompt_path)
-                        ]
-                        
-                        # Add reference file first if provided (as primary document)
-                        ref_is_pdf = False
-                        if batch_reference_path:
-                            ref_name_lower = batch_reference_file.name.lower()
-                            if ref_name_lower.endswith('.pdf'):
-                                cmd_analyze.extend(["--pdf_file1", str(batch_reference_path)])
-                                ref_is_pdf = True
+                        # Multi-run loop
+                        for run_num in range(1, num_runs_per_doc + 1):
+                            if num_runs_per_doc > 1:
+                                console_log += f"\n  === Run {run_num}/{num_runs_per_doc} ===\n"
+                                output_file_name = f"{file_base_name}_run{run_num}{output_ext}"
                             else:
-                                # For .docx, .md, .txt files, treat as markdown/context
-                                cmd_analyze.extend(["--md_file", str(batch_reference_path)])
-                        
-                        # Add the document being analyzed
-                        if is_pdf:
-                            if ref_is_pdf:
-                                # Reference is PDF, current doc is second PDF
-                                cmd_analyze.extend(["--pdf_file2", str(pdf_path)])
-                            else:
-                                # No PDF reference or reference is text, current doc is first PDF
-                                cmd_analyze.extend(["--pdf_file1", str(pdf_path)])
-                        else:
-                            # Current document is markdown
-                            if not batch_reference_path or ref_is_pdf:
-                                # No reference or reference is PDF, current doc goes as md_file
-                                cmd_analyze.extend(["--md_file", str(md_path)])
-                            else:
-                                # Reference is already in md_file, need to combine or use second slot
-                                # For simplicity, we'll append the current doc content to a combined md file
-                                combined_md_path = temp_dir_path / f"combined_context_{idx}.md"
-                                with open(batch_reference_path, 'r', encoding='utf-8') as ref_f:
-                                    ref_content = ref_f.read()
-                                with open(md_path, 'r', encoding='utf-8') as doc_f:
-                                    doc_content = doc_f.read()
-                                
-                                combined_content = f"# Reference Document\n\n{ref_content}\n\n# Document to Assess\n\n{doc_content}"
-                                with open(combined_md_path, 'w', encoding='utf-8') as combined_f:
-                                    combined_f.write(combined_content)
-                                
-                                cmd_analyze = [
-                                    sys.executable, str(awreason_path),
-                                    "--promptfile", str(batch_prompt_path),
-                                    "--md_file", str(combined_md_path)
-                                ]
-                        
-                        # Add JSON template if provided
-                        if batch_json_path:
-                            cmd_analyze.extend(["--jsonout_template", str(batch_json_path)])
-                        
-                        # Add output file
-                        cmd_analyze.extend(["--output", str(output_file_path)])
-                        
-                        # Execute analysis with retry logic and error handling
-                        max_retries = 3
-                        retry_count = 0
-                        analysis_success = False
-                        last_error_output = ""
-                        
-                        while retry_count <= max_retries and not analysis_success:
-                            try:
-                                # Check for existing output file and handle conflict
-                                if output_file_path.exists():
-                                    # Rename existing file with _prev suffix
-                                    prev_file_path = output_file_path.with_stem(f"{output_file_path.stem}_prev")
-                                    counter = 1
-                                    while prev_file_path.exists():
-                                        prev_file_path = output_file_path.with_stem(f"{output_file_path.stem}_prev{counter}")
-                                        counter += 1
-                                    
-                                    output_file_path.rename(prev_file_path)
-                                    console_log += f"Renamed existing file to: {prev_file_path.name}\n"
-                                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
-                                
-                                # Run the analysis with timeout
-                                result = subprocess.run(
-                                    cmd_analyze, 
-                                    capture_output=True, 
-                                    text=True, 
-                                    cwd=str(O1_ASSESSMENT_DIR),
-                                    timeout=300  # 5 minute timeout
-                                )
-                                
-                                # Capture all output for analysis
-                                full_output = ""
-                                if result.stdout:
-                                    full_output += result.stdout
-                                if result.stderr:
-                                    full_output += result.stderr
-                                
-                                console_log += full_output
-                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
-                                last_error_output = full_output
-                                
-                                if result.returncode == 0:
-                                    analysis_success = True
-                                    break
-                                else:
-                                    # Analyze the error type for retry logic
-                                    error_lower = full_output.lower()
-                                    should_retry = False
-                                    
-                                    # Check for retryable errors
-                                    retryable_errors = [
-                                        "429", "rate limit", "too many requests",
-                                        "connection", "timeout", "network", 
-                                        "502", "503", "504", "bad gateway",
-                                        "service unavailable", "gateway timeout",
-                                        "temporary failure", "try again"
-                                    ]
-                                    
-                                    for error_pattern in retryable_errors:
-                                        if error_pattern in error_lower:
-                                            should_retry = True
-                                            break
-                                    
-                                    if should_retry and retry_count < max_retries:
-                                        retry_count += 1
-                                        wait_time = 10 * retry_count  # Increasing wait time: 10s, 20s, 30s
-                                        console_log += f"Retryable error detected. Waiting {wait_time} seconds before retry {retry_count}/{max_retries}...\n"
-                                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
-                                        time.sleep(wait_time)
-                                        continue
-                                    else:
-                                        # Non-retryable error or max retries exceeded
-                                        break
+                                output_file_name = f"{file_base_name}-analysis{output_ext}"
                             
-                            except subprocess.TimeoutExpired:
-                                retry_count += 1
-                                last_error_output = f"Process timeout after 5 minutes"
-                                console_log += f"Process timeout. Retry {retry_count}/{max_retries}...\n"
-                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
-                                if retry_count <= max_retries:
-                                    time.sleep(10)
-                                    continue
-                                else:
-                                    break
-                            
-                            except Exception as subprocess_error:
-                                last_error_output = f"Subprocess execution error: {subprocess_error}"
-                                console_log += f"{last_error_output}\n"
-                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
-                                break
-                        
-                        if not analysis_success:
-                            # Determine error reason from the collected output
-                            error_output = last_error_output
-                            error_lower = error_output.lower()
-                            
-                            if any(pattern in error_lower for pattern in ["429", "rate limit", "too many requests"]):
-                                error_reason = f"Rate limiting error after {max_retries} retries"
-                            elif any(pattern in error_lower for pattern in ["connection", "network"]):
-                                error_reason = "Network connection error"
-                            elif any(pattern in error_lower for pattern in ["timeout", "timed out"]):
-                                error_reason = "Request/Process timeout"
-                            elif any(pattern in error_lower for pattern in ["502", "503", "504", "bad gateway", "service unavailable"]):
-                                error_reason = "Server error (502/503/504)"
-                            elif "filenotfounderror" in error_lower:
-                                error_reason = "Required file not found"
-                            elif "permissionerror" in error_lower:
-                                error_reason = "Permission denied"
-                            elif "openai" in error_lower and "api" in error_lower:
-                                error_reason = "OpenAI API error"
-                            elif "authentication" in error_lower or "unauthorized" in error_lower:
-                                error_reason = "Authentication error"
-                            elif "quota" in error_lower or "billing" in error_lower:
-                                error_reason = "Quota/Billing error"
-                            else:
-                                error_reason = "Analysis processing error"
-                            
-                            error_msg = f"ERROR: Failed to analyze {doc_file.name}\n"
-                            error_msg += f"Reason: {error_reason}\n"
-                            error_msg += f"Attempts: {retry_count + 1}\n"
-                            error_msg += f"Details: {error_output[:500]}...\n" if len(error_output) > 500 else f"Details: {error_output}\n"
-                            
-                            console_log += error_msg
+                            output_file_path = Path(batch_output_dir) / output_file_name
                             console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                             
+                            awreason_path = REPO_ROOT / "awreason.py"
+                            cmd_analyze = [
+                                sys.executable, str(awreason_path),
+                                "--promptfile", str(batch_prompt_path)
+                            ]
+                            
+                            # Add reference file first if provided (as primary document)
+                            ref_is_pdf = False
+                            if batch_reference_path:
+                                ref_name_lower = batch_reference_file.name.lower()
+                                if ref_name_lower.endswith('.pdf'):
+                                    cmd_analyze.extend(["--pdf_file1", str(batch_reference_path)])
+                                    ref_is_pdf = True
+                                else:
+                                    # For .docx, .md, .txt files, treat as markdown/context
+                                    cmd_analyze.extend(["--md_file", str(batch_reference_path)])
+                            
+                            # Add the document being analyzed
+                            if is_pdf:
+                                if ref_is_pdf:
+                                    # Reference is PDF, current doc is second PDF
+                                    cmd_analyze.extend(["--pdf_file2", str(pdf_path)])
+                                else:
+                                    # No PDF reference or reference is text, current doc is first PDF
+                                    cmd_analyze.extend(["--pdf_file1", str(pdf_path)])
+                            else:
+                                # Current document is markdown
+                                if not batch_reference_path or ref_is_pdf:
+                                    # No reference or reference is PDF, current doc goes as md_file
+                                    cmd_analyze.extend(["--md_file", str(md_path)])
+                                else:
+                                    # Reference is already in md_file, need to combine or use second slot
+                                    # For simplicity, we'll append the current doc content to a combined md file
+                                    combined_md_path = temp_dir_path / f"combined_context_{idx}.md"
+                                    with open(batch_reference_path, 'r', encoding='utf-8') as ref_f:
+                                        ref_content = ref_f.read()
+                                    with open(md_path, 'r', encoding='utf-8') as doc_f:
+                                        doc_content = doc_f.read()
+                                    
+                                    combined_content = f"# Reference Document\\n\\n{ref_content}\\n\\n# Document to Assess\\n\\n{doc_content}"
+                                    with open(combined_md_path, 'w', encoding='utf-8') as combined_f:
+                                        combined_f.write(combined_content)
+                                    
+                                    cmd_analyze = [
+                                        sys.executable, str(awreason_path),
+                                        "--promptfile", str(batch_prompt_path),
+                                        "--md_file", str(combined_md_path)
+                                    ]
+                            
+                            # Add JSON template if provided
+                            if batch_json_path:
+                                cmd_analyze.extend(["--jsonout_template", str(batch_json_path)])
+                            
+                            # Add output file
+                            cmd_analyze.extend(["--output", str(output_file_path)])
+                            
+                            # Execute analysis with retry logic and error handling
+                            max_retries = 3
+                            retry_count = 0
+                            analysis_success = False
+                            last_error_output = ""
+                            
+                            while retry_count <= max_retries and not analysis_success:
+                                try:
+                                    # Check for existing output file and handle conflict
+                                    if output_file_path.exists():
+                                        # Rename existing file with _prev suffix
+                                        prev_file_path = output_file_path.with_stem(f"{output_file_path.stem}_prev")
+                                        counter = 1
+                                        while prev_file_path.exists():
+                                            prev_file_path = output_file_path.with_stem(f"{output_file_path.stem}_prev{counter}")
+                                            counter += 1
+                                        
+                                        output_file_path.rename(prev_file_path)
+                                        console_log += f"Renamed existing file to: {prev_file_path.name}\n"
+                                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                    
+                                    # Run the analysis with timeout
+                                    result = subprocess.run(
+                                        cmd_analyze, 
+                                        capture_output=True, 
+                                        text=True, 
+                                        cwd=str(O1_ASSESSMENT_DIR),
+                                        timeout=300  # 5 minute timeout
+                                    )
+                                    
+                                    # Capture all output for analysis
+                                    full_output = ""
+                                    if result.stdout:
+                                        full_output += result.stdout
+                                    if result.stderr:
+                                        full_output += result.stderr
+                                    
+                                    console_log += full_output
+                                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                    last_error_output = full_output
+                                    
+                                    if result.returncode == 0:
+                                        analysis_success = True
+                                        break
+                                    else:
+                                        # Analyze the error type for retry logic
+                                        error_lower = full_output.lower()
+                                        should_retry = False
+                                        
+                                        # Check for retryable errors
+                                        retryable_errors = [
+                                            "429", "rate limit", "too many requests",
+                                            "connection", "timeout", "network", 
+                                            "502", "503", "504", "bad gateway",
+                                            "service unavailable", "gateway timeout",
+                                            "temporary failure", "try again"
+                                        ]
+                                        
+                                        for error_pattern in retryable_errors:
+                                            if error_pattern in error_lower:
+                                                should_retry = True
+                                                break
+                                        
+                                        if should_retry and retry_count < max_retries:
+                                            retry_count += 1
+                                            wait_time = 10 * retry_count  # Increasing wait time: 10s, 20s, 30s
+                                            console_log += f"Retryable error detected. Waiting {wait_time} seconds before retry {retry_count}/{max_retries}...\n"
+                                            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                            time.sleep(wait_time)
+                                            continue
+                                        else:
+                                            # Non-retryable error or max retries exceeded
+                                            break
+                                
+                                except subprocess.TimeoutExpired:
+                                    retry_count += 1
+                                    last_error_output = f"Process timeout after 5 minutes"
+                                    console_log += f"Process timeout. Retry {retry_count}/{max_retries}...\n"
+                                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                    if retry_count <= max_retries:
+                                        time.sleep(10)
+                                        continue
+                                    else:
+                                        break
+                                
+                                except Exception as subprocess_error:
+                                    last_error_output = f"Subprocess execution error: {subprocess_error}"
+                                    console_log += f"{last_error_output}\n"
+                                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                    break
+                            
+                            if not analysis_success:
+                                # Determine error reason from the collected output
+                                error_output = last_error_output
+                                error_lower = error_output.lower()
+                                
+                                if any(pattern in error_lower for pattern in ["429", "rate limit", "too many requests"]):
+                                    error_reason = f"Rate limiting error after {max_retries} retries"
+                                elif any(pattern in error_lower for pattern in ["connection", "network"]):
+                                    error_reason = "Network connection error"
+                                elif any(pattern in error_lower for pattern in ["timeout", "timed out"]):
+                                    error_reason = "Request/Process timeout"
+                                elif any(pattern in error_lower for pattern in ["502", "503", "504", "bad gateway", "service unavailable"]):
+                                    error_reason = "Server error (502/503/504)"
+                                elif "filenotfounderror" in error_lower:
+                                    error_reason = "Required file not found"
+                                elif "permissionerror" in error_lower:
+                                    error_reason = "Permission denied"
+                                elif "openai" in error_lower and "api" in error_lower:
+                                    error_reason = "OpenAI API error"
+                                elif "authentication" in error_lower or "unauthorized" in error_lower:
+                                    error_reason = "Authentication error"
+                                elif "quota" in error_lower or "billing" in error_lower:
+                                    error_reason = "Quota/Billing error"
+                                else:
+                                    error_reason = "Analysis processing error"
+                                
+                                error_msg = f"ERROR: Failed to analyze {doc_file.name}"
+                                if num_runs_per_doc > 1:
+                                    error_msg += f" (Run {run_num}/{num_runs_per_doc})\\n"
+                                else:
+                                    error_msg += "\\n"
+                                error_msg += f"Reason: {error_reason}\\n"
+                                error_msg += f"Attempts: {retry_count + 1}\\n"
+                                error_msg += f"Details: {error_output[:500]}...\\n" if len(error_output) > 500 else f"Details: {error_output}\\n"
+                                
+                                console_log += error_msg
+                                console_output_batch.markdown(f'<div class=\"console-output\">{console_log}</div>', unsafe_allow_html=True)
+                                
+                                # For multi-run, continue with other runs; for single run, record failure
+                                if num_runs_per_doc == 1:
+                                    batch_results.append({
+                                        'file': doc_file.name,
+                                        'status': 'failed',
+                                        'error': error_reason,
+                                        'details': error_output[:1000] if error_output else "No error details available",
+                                        'attempts': retry_count + 1,
+                                        'output': None
+                                    })
+                                    break  # Exit try block
+                                else:
+                                    # Multi-run mode: just continue to next run
+                                    continue
+                            
+                            # Success for this run
+                            if num_runs_per_doc > 1:
+                                console_log += f"  ✓ Run {run_num} completed: {output_file_name}\\n"
+                            else:
+                                console_log += f"✓ COMPLETED: {doc_file.name} -> {output_file_name}\\n"
+                            console_output_batch.markdown(f'<div class=\"console-output\">{console_log}</div>', unsafe_allow_html=True)
+                            
+                            # Add to run files list
+                            run_files_list.append(str(output_file_path))
+                        
+                        # End of multi-run loop - now after all runs complete
+                        # After all runs complete
+                        if not run_files_list and num_runs_per_doc == 1:
+                            # Already recorded failure above
+                            pass
+                        elif run_files_list:
+                            # Attempt aggregation if enabled and multiple runs succeeded
+                            aggregated_path = None
+                            variance_info = None
+                            
+                            if num_runs_per_doc > 1 and enable_aggregation and len(run_files_list) >= 2:
+                                console_log += f"\n  Aggregating {len(run_files_list)} runs using {aggregation_method}...\n"
+                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                
+                                try:
+                                    # Import aggregation
+                                    sys.path.insert(0, str(REPO_ROOT))
+                                    from aggregate_scores import aggregate_multiple_runs
+                                    
+                                    run_paths = [Path(f) for f in run_files_list]
+                                    agg_result = aggregate_multiple_runs(run_paths, method=aggregation_method)
+                                    
+                                    if 'error' not in agg_result:
+                                        # Save aggregated result
+                                        aggregated_filename = f"{file_base_name}_aggregated{output_ext}"
+                                        aggregated_path = Path(batch_output_dir) / aggregated_filename
+                                        
+                                        if batch_json_path:
+                                            with open(aggregated_path, 'w', encoding='utf-8') as f:
+                                                json.dump(agg_result.get('aggregated_result', {}), f, indent=2)
+                                        else:
+                                            from aggregate_assessment_runs import generate_html_report
+                                            generate_html_report(agg_result, aggregated_path)
+                                        
+                                        console_log += f"  ✓ Aggregation complete: {aggregated_filename}\n"
+                                        
+                                        if show_variance_analysis:
+                                            variance_data = agg_result.get('variance_analysis', {})
+                                            if variance_data:
+                                                high_var = sum(1 for m in variance_data.values() 
+                                                             if isinstance(m, dict) and m.get('cv_percentage', 0) > 15)
+                                                avg_cv = sum(m.get('cv_percentage', 0) for m in variance_data.values() 
+                                                           if isinstance(m, dict)) / len(variance_data) if variance_data else 0
+                                                variance_info = {'avg_cv': avg_cv, 'high_variance_count': high_var, 'total_fields': len(variance_data)}
+                                                console_log += f"  Variance: Avg CV={avg_cv:.1f}%, {high_var}/{len(variance_data)} high variance fields\n"
+                                    else:
+                                        console_log += f"  ✗ Aggregation failed: {agg_result.get('error', 'Unknown')}\n"
+                                    
+                                except Exception as agg_err:
+                                    console_log += f"  ✗ Aggregation error: {str(agg_err)}\n"
+                                
+                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                            
+                            # Record success with all run info
+                            result_data = {
+                                'file': doc_file.name,
+                                'status': 'success',
+                                'runs_completed': len(run_files_list),
+                                'runs_requested': num_runs_per_doc,
+                                'run_files': run_files_list,
+                                'output': str(aggregated_path) if aggregated_path else run_files_list[0]
+                            }
+                            if aggregated_path:
+                                result_data['aggregated_path'] = str(aggregated_path)
+                            if variance_info:
+                                result_data['variance'] = variance_info
+                            if md_path:
+                                result_data['markdown'] = str(md_path)
+                            batch_results.append(result_data)
+                        elif num_runs_per_doc > 1 and not run_files_list:
+                            # Multi-run but all failed
                             batch_results.append({
                                 'file': doc_file.name,
                                 'status': 'failed',
-                                'error': error_reason,
-                                'details': error_output[:1000] if error_output else "No error details available",
-                                'attempts': retry_count + 1,
+                                'runs_completed': 0,
+                                'runs_requested': num_runs_per_doc,
+                                'error': 'All runs failed',
                                 'output': None
                             })
-                            continue
-                        
-                        # Success
-                        console_log += f"✓ COMPLETED: {doc_file.name} -> {output_file_name}\n"
-                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
-                        
-                        result_data = {
-                            'file': doc_file.name,
-                            'status': 'success',
-                            'output': str(output_file_path)
-                        }
-                        if md_path:
-                            result_data['markdown'] = str(md_path)
-                        batch_results.append(result_data)
-                        
+                    
                     except Exception as e:
                         error_msg = f"ERROR: Exception processing {doc_file.name}: {str(e)}\n"
                         console_log += error_msg
@@ -1552,6 +1753,254 @@ def main():
                 # Store results in session state
                 st.session_state.batch_results = batch_results
                 st.session_state.show_batch_results = True
+                
+                # Create consolidated total file if requested
+                if num_runs_per_doc > 1 and enable_aggregation and create_total_file:
+                    console_log += f"\n{'='*60}\n"
+                    console_log += "Creating consolidated results file...\n"
+                    console_log += f"{'='*60}\n"
+                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                    
+                    try:
+                        # Collect all aggregated results and variance data
+                        all_aggregated_data = []
+                        all_variance_data = []
+                        all_scores = []
+                        
+                        for result in batch_results:
+                            if result['status'] == 'success' and result.get('aggregated_path'):
+                                # Load aggregated result
+                                agg_path = Path(result['aggregated_path'])
+                                if agg_path.exists():
+                                    with open(agg_path, 'r', encoding='utf-8') as f:
+                                        agg_data = json.load(f)
+                                    
+                                    doc_entry = {
+                                        'document': result['file'],
+                                        'aggregated_result': agg_data,
+                                        'runs_completed': result.get('runs_completed', 0)
+                                    }
+                                    
+                                    if result.get('variance'):
+                                        doc_entry['variance_summary'] = result['variance']
+                                        all_variance_data.append(result['variance'])
+                                    
+                                    all_aggregated_data.append(doc_entry)
+                                    
+                                    # Collect numeric scores for batch statistics
+                                    def extract_numbers(obj):
+                                        nums = []
+                                        if isinstance(obj, dict):
+                                            for v in obj.values():
+                                                nums.extend(extract_numbers(v))
+                                        elif isinstance(obj, list):
+                                            for item in obj:
+                                                nums.extend(extract_numbers(item))
+                                        elif isinstance(obj, (int, float)) and not isinstance(obj, bool):
+                                            nums.append(float(obj))
+                                        return nums
+                                    
+                                    all_scores.extend(extract_numbers(agg_data))
+                        
+                        # Calculate batch-level statistics
+                        batch_statistics = {
+                            'total_documents': len(all_aggregated_data),
+                            'total_runs': sum(d.get('runs_completed', 0) for d in all_aggregated_data)
+                        }
+                        
+                        if all_scores:
+                            import statistics
+                            batch_statistics['score_statistics'] = {
+                                'mean': statistics.mean(all_scores),
+                                'median': statistics.median(all_scores),
+                                'std_dev': statistics.stdev(all_scores) if len(all_scores) > 1 else 0,
+                                'min': min(all_scores),
+                                'max': max(all_scores),
+                                'count': len(all_scores)
+                            }
+                        
+                        if all_variance_data:
+                            avg_cv = statistics.mean([v['avg_cv'] for v in all_variance_data])
+                            total_high_var = sum(v['high_variance_count'] for v in all_variance_data)
+                            total_fields = sum(v['total_fields'] for v in all_variance_data)
+                            
+                            batch_statistics['variance_statistics'] = {
+                                'average_cv_across_batch': avg_cv,
+                                'total_high_variance_fields': total_high_var,
+                                'total_fields_analyzed': total_fields,
+                                'high_variance_percentage': (total_high_var / total_fields * 100) if total_fields > 0 else 0
+                            }
+                        
+                        # Create consolidated file
+                        total_file_data = {
+                            'batch_info': {
+                                'aggregation_method': aggregation_method,
+                                'runs_per_document': num_runs_per_doc,
+                                'batch_directory': batch_output_dir,
+                                'created': datetime.now().isoformat()
+                            },
+                            'batch_statistics': batch_statistics,
+                            'documents': all_aggregated_data
+                        }
+                        
+                        total_file_path = Path(batch_output_dir) / "batch_aggregated_total.json"
+                        with open(total_file_path, 'w', encoding='utf-8') as f:
+                            json.dump(total_file_data, f, indent=2)
+                        
+                        console_log += f"✓ Created consolidated file: {total_file_path.name}\n"
+                        console_log += f"  Documents: {len(all_aggregated_data)}\n"
+                        console_log += f"  Batch mean: {batch_statistics.get('score_statistics', {}).get('mean', 'N/A'):.2f}\n" if 'score_statistics' in batch_statistics else ""
+                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                        
+                    except Exception as e:
+                        console_log += f"✗ Error creating consolidated file: {str(e)}\n"
+                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                
+                # Apply statistical normalization if requested
+                if num_runs_per_doc > 1 and enable_aggregation and apply_normalization:
+                    console_log += f"\n{'='*60}\n"
+                    console_log += "Applying statistical normalization...\n"
+                    console_log += f"Method: {normalization_method}, Target mean: {target_mean}\n"
+                    console_log += f"{'='*60}\n"
+                    console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                    
+                    try:
+                        sys.path.insert(0, str(REPO_ROOT))
+                        from aggregate_scores import ScoreNormalizer
+                        
+                        normalized_documents = []
+                        all_normalized_scores = []
+                        
+                        for result in batch_results:
+                            if result['status'] == 'success' and result.get('aggregated_path'):
+                                agg_path = Path(result['aggregated_path'])
+                                if agg_path.exists():
+                                    # Load original aggregated result
+                                    with open(agg_path, 'r', encoding='utf-8') as f:
+                                        agg_data = json.load(f)
+                                    
+                                    # Extract all numeric values with their paths
+                                    def extract_with_paths(obj, prefix=''):
+                                        scores = {}
+                                        if isinstance(obj, dict):
+                                            for key, value in obj.items():
+                                                new_prefix = f"{prefix}.{key}" if prefix else key
+                                                scores.update(extract_with_paths(value, new_prefix))
+                                        elif isinstance(obj, list):
+                                            for i, item in enumerate(obj):
+                                                scores.update(extract_with_paths(item, f"{prefix}[{i}]"))
+                                        elif isinstance(obj, (int, float)) and not isinstance(obj, bool):
+                                            scores[prefix] = float(obj)
+                                        return scores
+                                    
+                                    score_dict = extract_with_paths(agg_data)
+                                    
+                                    if score_dict:
+                                        # Get scores and normalize
+                                        scores_list = list(score_dict.values())
+                                        original_mean = statistics.mean(scores_list)
+                                        
+                                        # Normalize scores
+                                        normalized_scores = ScoreNormalizer.normalize(
+                                            scores_list,
+                                            method=normalization_method,
+                                            target_mean=target_mean
+                                        )
+                                        
+                                        # Create mapping of normalized scores
+                                        normalized_dict = dict(zip(score_dict.keys(), normalized_scores))
+                                        
+                                        # Apply normalized values to original structure
+                                        def apply_normalized(obj, norm_dict, prefix=''):
+                                            if isinstance(obj, dict):
+                                                result = {}
+                                                for key, value in obj.items():
+                                                    new_prefix = f"{prefix}.{key}" if prefix else key
+                                                    result[key] = apply_normalized(value, norm_dict, new_prefix)
+                                                return result
+                                            elif isinstance(obj, list):
+                                                return [apply_normalized(item, norm_dict, f"{prefix}[{i}]") for i, item in enumerate(obj)]
+                                            elif isinstance(obj, (int, float)) and not isinstance(obj, bool):
+                                                return normalized_dict.get(prefix, obj)
+                                            else:
+                                                return obj
+                                        
+                                        normalized_data = apply_normalized(agg_data, normalized_dict)
+                                        
+                                        # Add shift metadata
+                                        shift_amount = target_mean - original_mean
+                                        per_field_shifts = {k: (normalized_dict[k] - score_dict[k]) for k in score_dict.keys()}
+                                        
+                                        normalized_data['_shift_metadata'] = {
+                                            'original_mean': original_mean,
+                                            'target_mean': target_mean,
+                                            'bias': shift_amount,
+                                            'normalization_method': normalization_method,
+                                            'per_field_shifts': per_field_shifts,
+                                            'applied_at': datetime.now().isoformat()
+                                        }
+                                        
+                                        # Save shifted file
+                                        shift_file_name = agg_path.stem + '_shift' + agg_path.suffix
+                                        shift_file_path = agg_path.parent / shift_file_name
+                                        with open(shift_file_path, 'w', encoding='utf-8') as f:
+                                            json.dump(normalized_data, f, indent=2)
+                                        
+                                        console_log += f"✓ Normalized: {result['file']} (shift: {shift_amount:+.2f})\n"
+                                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                        
+                                        # Track for total file
+                                        normalized_documents.append({
+                                            'document': result['file'],
+                                            'normalized_result': normalized_data,
+                                            'original_mean': original_mean,
+                                            'shift_applied': shift_amount
+                                        })
+                                        all_normalized_scores.extend(normalized_scores)
+                        
+                        # Create total shift file if we have normalized data
+                        if normalized_documents and create_total_file:
+                            # Calculate batch statistics for normalized data
+                            normalized_batch_stats = {
+                                'total_documents': len(normalized_documents),
+                                'normalization_method': normalization_method,
+                                'target_mean': target_mean
+                            }
+                            
+                            if all_normalized_scores:
+                                normalized_batch_stats['normalized_statistics'] = {
+                                    'mean': statistics.mean(all_normalized_scores),
+                                    'median': statistics.median(all_normalized_scores),
+                                    'std_dev': statistics.stdev(all_normalized_scores) if len(all_normalized_scores) > 1 else 0,
+                                    'min': min(all_normalized_scores),
+                                    'max': max(all_normalized_scores)
+                                }
+                            
+                            total_shift_data = {
+                                'batch_info': {
+                                    'aggregation_method': aggregation_method,
+                                    'runs_per_document': num_runs_per_doc,
+                                    'normalization_applied': True,
+                                    'batch_directory': batch_output_dir,
+                                    'created': datetime.now().isoformat()
+                                },
+                                'batch_statistics': normalized_batch_stats,
+                                'documents': normalized_documents
+                            }
+                            
+                            total_shift_path = Path(batch_output_dir) / "batch_aggregated_total_shift.json"
+                            with open(total_shift_path, 'w', encoding='utf-8') as f:
+                                json.dump(total_shift_data, f, indent=2)
+                            
+                            console_log += f"\n✓ Created normalized total file: {total_shift_path.name}\n"
+                            console_log += f"  Normalized mean: {normalized_batch_stats.get('normalized_statistics', {}).get('mean', 'N/A'):.2f}\n" if 'normalized_statistics' in normalized_batch_stats else ""
+                            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                        
+                    except Exception as e:
+                        console_log += f"✗ Error applying normalization: {str(e)}\n"
+                        import traceback
+                        console_log += f"Details: {traceback.format_exc()}\n"
+                        console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
         
         # Display batch results
         if st.session_state.get('show_batch_results') and st.session_state.get('batch_results'):
@@ -1570,30 +2019,152 @@ def main():
             with col3:
                 st.metric("Failed", failed_count)
             
+            # Show consolidated and normalized files if they exist
+            batch_dir = st.session_state.batch_output_directory
+            total_file = Path(batch_dir) / "batch_aggregated_total.json"
+            total_shift_file = Path(batch_dir) / "batch_aggregated_total_shift.json"
+            
+            if total_file.exists() or total_shift_file.exists():
+                st.markdown("#### Batch-Level Files")
+                batch_file_cols = st.columns(2)
+                
+                with batch_file_cols[0]:
+                    if total_file.exists():
+                        st.markdown("**📊 Consolidated Results:**")
+                        st.markdown(get_binary_file_downloader_html(str(total_file), 
+                                  f"Download {total_file.name}"), unsafe_allow_html=True)
+                        
+                        # Show quick stats
+                        try:
+                            with open(total_file, 'r', encoding='utf-8') as f:
+                                total_data = json.load(f)
+                            batch_stats = total_data.get('batch_statistics', {})
+                            if 'score_statistics' in batch_stats:
+                                st.caption(f"Batch mean: {batch_stats['score_statistics']['mean']:.2f}")
+                            if 'variance_statistics' in batch_stats:
+                                st.caption(f"Avg CV: {batch_stats['variance_statistics']['average_cv_across_batch']:.1f}%")
+                        except:
+                            pass
+                
+                with batch_file_cols[1]:
+                    if total_shift_file.exists():
+                        st.markdown("**📈 Normalized Results:**")
+                        st.markdown(get_binary_file_downloader_html(str(total_shift_file), 
+                                  f"Download {total_shift_file.name}"), unsafe_allow_html=True)
+                        
+                        # Show normalization stats
+                        try:
+                            with open(total_shift_file, 'r', encoding='utf-8') as f:
+                                shift_data = json.load(f)
+                            norm_stats = shift_data.get('batch_statistics', {})
+                            if 'normalized_statistics' in norm_stats:
+                                st.caption(f"Normalized mean: {norm_stats['normalized_statistics']['mean']:.2f}")
+                            st.caption(f"Method: {norm_stats.get('normalization_method', 'N/A')}")
+                        except:
+                            pass
+            
             # Show detailed results
             st.markdown("#### Detailed Results")
             for result in results:
-                with st.expander(f"{'✅' if result['status'] == 'success' else '❌'} {result['file']}", expanded=False):
+                # Determine icon based on multi-run status
+                runs_completed = result.get('runs_completed', 1)
+                runs_requested = result.get('runs_requested', 1)
+                is_aggregated = 'aggregated_path' in result
+                
+                if result['status'] == 'success':
+                    if is_aggregated:
+                        icon = "📊"  # Aggregated result
+                    elif runs_completed > 1:
+                        icon = "🔄"  # Multiple runs, not aggregated
+                    else:
+                        icon = "✓"  # Single run
+                else:
+                    icon = "✗"
+                
+                # Build status text
+                status_parts = []
+                if runs_requested > 1:
+                    status_parts.append(f"{runs_completed}/{runs_requested} runs")
+                if is_aggregated:
+                    status_parts.append("aggregated")
+                
+                status_suffix = f" ({', '.join(status_parts)})" if status_parts else ""
+                with st.expander(f"{'✅' if result['status'] == 'success' else '❌'} {result['file']}{status_suffix}", expanded=False):
                     if result['status'] == 'success':
-                        st.success("Processing completed successfully")
-                        output_type = "JSON" if result['output'].endswith('.json') else "HTML"
-                        st.write(f"**Output {output_type}:** {result['output']}")
-                        if 'markdown' in result:
-                            st.write(f"**Markdown:** {result['markdown']}")
+                        st.success("Processing completed successfully" + status_suffix)
                         
-                        # Preview output
+                        # Show variance info if available
+                        if 'variance' in result:
+                            var_info = result['variance']
+                            cv_color = "green" if var_info['avg_cv'] < 10 else "orange" if var_info['avg_cv'] < 15 else "red"
+                            st.markdown(f"**📈 Variance Analysis:** Avg CV: <span style='color:{cv_color}'>{var_info['avg_cv']:.1f}%</span>, "
+                                      f"{var_info['high_variance_count']}/{var_info['total_fields']} fields with high variance (>15%)",
+                                      unsafe_allow_html=True)
+                        
+                        # Check for normalized version
+                        output_path = Path(result['output'])
+                        shift_file = output_path.parent / (output_path.stem + '_shift' + output_path.suffix)
+                        has_normalized = shift_file.exists()
+                        
+                        # Show primary output
+                        output_type = "JSON" if result['output'].endswith('.json') else "HTML"
+                        st.write(f"**Primary Output ({output_type}):** {Path(result['output']).name}")
+                        st.markdown(get_binary_file_downloader_html(result['output'], 
+                                  f"Download {os.path.basename(result['output'])}"),
+                                  unsafe_allow_html=True)
+                        
+                        # Show normalized version if exists
+                        if has_normalized:
+                            st.write(f"**Normalized Output:** {shift_file.name}")
+                            st.markdown(get_binary_file_downloader_html(str(shift_file), 
+                                      f"Download {shift_file.name} (with statistical adjustment)"),
+                                      unsafe_allow_html=True)
+                            
+                            # Show shift info
+                            try:
+                                with open(shift_file, 'r', encoding='utf-8') as f:
+                                    shift_data = json.load(f)
+                                if '_shift_metadata' in shift_data:
+                                    meta = shift_data['_shift_metadata']
+                                    shift_amount = meta.get('bias', 0)
+                                    shift_color = "green" if abs(shift_amount) < 5 else "orange" if abs(shift_amount) < 10 else "red"
+                                    st.caption(f"Shift applied: <span style='color:{shift_color}'>{shift_amount:+.2f}</span> "
+                                             f"(Original mean: {meta.get('original_mean', 0):.2f} → Target: {meta.get('target_mean', 0):.2f})",
+                                             unsafe_allow_html=True)
+                            except:
+                                pass
+                        
+                        # Show individual run files if multi-run
+                        if runs_completed > 1 and result.get('run_files'):
+                            st.markdown("---")
+                            st.markdown("**📂 Individual Run Files:**")
+                            for i, run_file in enumerate(result.get('run_files', []), 1):
+                                col1, col2 = st.columns([3, 1])
+                                with col1:
+                                    st.caption(f"Run {i}: {Path(run_file).name}")
+                                with col2:
+                                    st.markdown(get_binary_file_downloader_html(run_file, f"⬇️ Run {i}"), 
+                                              unsafe_allow_html=True)
+                        
+                        # Show markdown if converted
+                        if 'markdown' in result:
+                            st.write(f"**Markdown:** {Path(result['markdown']).name}")
+                        
+                        # Preview output (primary aggregated or single result)
                         if os.path.exists(result['output']):
                             with st.container():
                                 st.markdown("**Preview:**")
                                 display_file_content(result['output'])
-                            
-                            # Download link
-                            st.markdown(
-                                get_binary_file_downloader_html(result['output'], f"Download {os.path.basename(result['output'])}"),
-                                unsafe_allow_html=True
-                            )
                     else:
                         st.error(f"Processing failed: {result.get('error', 'Unknown error')}")
+                        if runs_completed > 0:
+                            st.warning(f"Completed {runs_completed}/{runs_requested} runs before complete failure")
+                            # Show partial results if any
+                            if result.get('run_files'):
+                                st.markdown("**Partial results:**")
+                                for i, run_file in enumerate(result.get('run_files', []), 1):
+                                    st.markdown(get_binary_file_downloader_html(run_file, f"Download Run {i}"), 
+                                              unsafe_allow_html=True)
                         if 'details' in result:
                             st.markdown("**📋 Error Details:**")
                             st.code(result['details'], language='text')
