@@ -46,18 +46,12 @@ pip install azure-identity pillow python-docx markdownify loguru
 Ensure your Azure environment is configured with:
 - Azure Content Understanding service
 - Appropriate authentication (DefaultAzureCredential)
-- Valid `config.json` with Azure AI endpoint configuration
+- Valid .env with Azure AI endpoint configuration
 
 ### Configuration
 
-The utility requires a `config.json` file in the parent directory with the following structure:
+The utility requires a valid.env file in the parent directory with the environment variables set as per the .env_sample file:
 
-```json
-{
-    "azure_ai_endpoint": "https://your-ai-service.cognitiveservices.azure.com/",
-    "azure_ai_api_version": "2024-12-01-preview"
-}
-```
 
 ### Usage
 
@@ -179,7 +173,7 @@ pip install azure-identity pillow python-docx markdownify loguru
 ```
 
 **Configuration Issues:**
-- Verify `config.json` exists in the parent directory
+- Verify `.env` exists in the parent directory
 - Check Azure AI endpoint URL is correct
 - Ensure API version is supported
 

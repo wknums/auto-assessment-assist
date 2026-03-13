@@ -24,6 +24,83 @@ from pdf2png_utils import extract_pdf_pages_to_images, join_images_in_pairs
 # Initialize logger
 logger = logging.getLogger(__name__)
 
+def get_model_type(deployment_name):
+    """
+    Determine the model type based on the deployment name.
+    Returns 'gpt5' for GPT-5.1/5.2 models, 'o1' for O1/O3 models.
+    """
+    deployment_lower = deployment_name.lower()
+    if 'gpt-5' in deployment_lower or 'gpt5' in deployment_lower:
+        return 'gpt5'
+    elif 'o1' in deployment_lower or 'o3' in deployment_lower:
+        return 'o1'
+    else:
+        # Default to o1 for backward compatibility
+        logger.warning(f"Unknown model type for deployment '{deployment_name}', defaulting to O1/O3 API")
+        return 'o1'
+
+def get_model_config(model_type, api_version, json_template=None, reasoning_effort="high"):
+    """
+    Get model-specific configuration parameters.
+    
+    Args:
+        model_type: 'o1' for O1/O3, 'gpt5' for GPT-5.1/5.2
+        api_version: API version string
+        json_template: Whether JSON structured output is requested
+        reasoning_effort: Reasoning effort level ("low", "medium", "high")
+    
+    Returns:
+        Dictionary with model-specific parameters
+    """
+    config = {
+        'api_method': None,  # 'chat.completions' or 'responses'
+        'message_key': None,  # 'messages' or 'input'
+        'reasoning_param': None,  # Parameter structure for reasoning
+        'max_tokens_param': None,  # Parameter name for max tokens
+        'max_tokens_value': 15000,  # Default max tokens
+        'response_format': None,  # For structured output
+        'response_path': None,  # Path to extract response text
+    }
+    
+    if model_type == 'gpt5':
+        # GPT-5.1 and GPT-5.2 use Responses API
+        config['api_method'] = 'responses'
+        config['message_key'] = 'input'
+        config['reasoning_param'] = {
+            'reasoning': {
+                'effort': reasoning_effort,
+                'summary': 'auto'
+            },
+            'text': {
+                'verbosity': 'low'
+            }
+        }
+        config['max_tokens_param'] = 'max_output_tokens'
+        config['max_tokens_value'] = 15000
+        config['response_path'] = 'output_text'
+        if json_template:
+            config['response_format'] = {'type': 'json_object'}
+    else:
+        # O1 and O3 use Chat Completions API
+        config['api_method'] = 'chat.completions'
+        config['message_key'] = 'messages'
+        
+        # For newer API versions (2024-02-01-preview and later)
+        if api_version.startswith("2024"):
+            config['max_tokens_param'] = 'max_completion_tokens'
+            # Add reasoning_effort only if we're not using structured output
+            if not json_template:
+                config['reasoning_param'] = {'reasoning_effort': reasoning_effort}
+        else:
+            config['max_tokens_param'] = 'max_tokens'
+        
+        config['max_tokens_value'] = 15000
+        config['response_path'] = 'choices[0].message.content'
+        if json_template:
+            config['response_format'] = {'type': 'json_object'}
+    
+    return config
+
 def setup_logging():
     """
     Configure Azure-compliant logging with both file and console handlers.
@@ -307,8 +384,11 @@ def main():
     logger.info("="*80)
     
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Chat with O1 model using text and images')
+    parser = argparse.ArgumentParser(description='Chat with Azure OpenAI reasoning models (O1, O3, GPT-5.1, GPT-5.2) using text and images')
 
+    # Add model selection argument
+    parser.add_argument('--model', type=str, help='Override model deployment name (default: from AZURE_OPENAI_DEPLOYMENT_O1 env var)')
+    
     # Accept up to two PDF files (both must be files, not directories)
     parser.add_argument('--pdf_file1', type=str, help='First PDF file to process (all pages will be extracted as images)')
     parser.add_argument('--pdf_file2', type=str, help='Second PDF file to process (all pages will be extracted as images)')
@@ -474,11 +554,50 @@ def main():
 
     # Retrieve environment variables with defaults
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_O1", "o1")
-    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+    deployment = args.model if args.model else os.getenv("AZURE_OPENAI_DEPLOYMENT_O1", "o1")
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
     tenant_id = os.getenv("AZURE_TENANT_ID")
     subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
+    
+    # Determine model type and get configuration
+    model_type = get_model_type(deployment)
+    logger.info(f"Detected model type: {model_type.upper()}")
+    
+    # Auto-select API version based on model type if not explicitly set
+    # GPT-5.x requires 2025-03-01-preview or later
+    # O1/O3 work with 2024-12-01-preview
+    api_version_env = os.getenv("AZURE_OPENAI_API_VERSION")
+    if api_version_env:
+        api_version = api_version_env
+        logger.info(f"Using API version from environment: {api_version}")
+    else:
+        # Auto-select based on model type
+        if model_type == 'gpt5':
+            api_version = "2025-03-01-preview"
+            logger.info(f"Auto-selected API version for GPT-5.x: {api_version}")
+        else:
+            api_version = "2024-12-01-preview"
+            logger.info(f"Auto-selected API version for O1/O3: {api_version}")
+    
+    # Validate API version compatibility with model type
+    if model_type == 'gpt5':
+        # Extract year and month from API version (format: YYYY-MM-DD-preview)
+        try:
+            version_parts = api_version.split('-')
+            if len(version_parts) >= 2:
+                year = int(version_parts[0])
+                month = int(version_parts[1])
+                version_date = year * 100 + month  # e.g., 202503 for 2025-03
+                
+                if version_date < 202503:  # Before 2025-03-01
+                    logger.warning(f"API version {api_version} may not support GPT-5.x models")
+                    logger.warning("GPT-5.x models require API version 2025-03-01-preview or later")
+                    logger.warning("Automatically upgrading to 2025-03-01-preview")
+                    api_version = "2025-03-01-preview"
+        except (ValueError, IndexError):
+            # If we can't parse the version, warn but continue
+            logger.warning(f"Could not parse API version: {api_version}")
+            logger.warning("Using as-is, but GPT-5.x may require 2025-03-01-preview or later")
 
     # Debug: Print assigned environment variables
     logger.info("="*60)
@@ -556,11 +675,17 @@ def main():
             api_version=api_version,  
         )
     
-    # Set up the messages for the chat
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant that can analyze both text and images. Provide detailed analysis when images are included."},
-        {"role": "user", "content": []}
-    ]
+    # Set up the messages for the chat (format depends on model type)
+    if model_type == 'gpt5':
+        # GPT-5.x Responses API uses array of content items wrapped in messages
+        # We'll build content array and wrap it in a message at the end
+        input_content = []
+    else:
+        # O1/O3 use traditional messages format
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that can analyze both text and images. Provide detailed analysis when images are included."},
+            {"role": "user", "content": []}
+        ]
     
     # Modify the prompt text if both folders have images
     if folder1_images and folder2_images:
@@ -580,7 +705,10 @@ def main():
         logger.info("Enhanced prompt with document separation information")
     
     # Add the text prompt
-    messages[1]["content"].append({"type": "text", "text": prompt_text})
+    if model_type == 'gpt5':
+        input_content.append({"type": "input_text", "text": prompt_text})
+    else:
+        messages[1]["content"].append({"type": "text", "text": prompt_text})
     
     # Add all collected images to the message content
     total_images = len(folder1_images) + len(folder2_images)
@@ -593,12 +721,22 @@ def main():
             for img_path in folder1_images:
                 try:
                     base64_image = encode_image_to_base64(img_path)
-                    messages[1]["content"].append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{base64_image}"
+                    if model_type == 'gpt5':
+                        # GPT-5.x Responses API format
+                        image_content = {
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{base64_image}"
                         }
-                    })
+                        input_content.append(image_content)
+                    else:
+                        # O1/O3 Chat Completions API format
+                        image_content = {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                        messages[1]["content"].append(image_content)
                     logger.debug(f"Added image: {img_path.name}")
                 except Exception as e:
                     logger.error(f"Error processing image {img_path}: {e}")
@@ -609,45 +747,90 @@ def main():
             for img_path in folder2_images:
                 try:
                     base64_image = encode_image_to_base64(img_path)
-                    messages[1]["content"].append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{base64_image}"
+                    if model_type == 'gpt5':
+                        # GPT-5.x Responses API format
+                        image_content = {
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{base64_image}"
                         }
-                    })
+                        input_content.append(image_content)
+                    else:
+                        # O1/O3 Chat Completions API format
+                        image_content = {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                        messages[1]["content"].append(image_content)
                     logger.debug(f"Added image: {img_path.name}")
                 except Exception as e:
                     logger.error(f"Error processing image {img_path}: {e}")
     
-    # Configure additional parameters for the O1 model
-    completion_params = {
-        "model": deployment,
-        "messages": messages,
-        #"temperature": 0.2,  # Lower temperature for more deterministic results - not supported by O1
-        # Note: seed parameter is not supported by o1 models with vision (images)
-    }
+    # Get model-specific configuration
+    model_config = get_model_config(
+        model_type=model_type,
+        api_version=api_version,
+        json_template=json_template,
+        reasoning_effort="high"
+    )
     
-    # Check API version and adjust parameters accordingly
+    # Configure request parameters based on model type
     logger.info("CONFIGURING REQUEST PARAMETERS:")
+    logger.info(f"Model type: {model_type.upper()}")
+    logger.info(f"API method: {model_config['api_method']}")
     logger.info(f"Using API version: {api_version}")
     
-    # For newer API versions (2024-02-01-preview and later)
-    if api_version.startswith("2024"):
-        completion_params["max_completion_tokens"] = 15000
-        # Add reasoning_effort only if we're not using structured output
-        if not json_template:
-            completion_params["reasoning_effort"] = "high"
+    # Build parameters based on model type
+    if model_type == 'gpt5':
+        # GPT-5.x uses Responses API
+        # Wrap input_content in a message structure with role
+        completion_params = {
+            "model": deployment,
+            "input": [
+                {
+                    "role": "user",
+                    "content": input_content
+                }
+            ],
+        }
+        
+        # Add reasoning parameters
+        if model_config['reasoning_param']:
+            completion_params.update(model_config['reasoning_param'])
+            logger.info(f"Reasoning effort: {model_config['reasoning_param']['reasoning']['effort']}")
+        
+        # Add max tokens
+        completion_params[model_config['max_tokens_param']] = model_config['max_tokens_value']
+        
+        # Add response format for structured output
+        if model_config['response_format']:
+            completion_params['response_format'] = model_config['response_format']
+            logger.info("Requesting structured JSON output from the model")
     else:
-        # For older API versions
-        completion_params["max_tokens"] = 15000
+        # O1/O3 use Chat Completions API
+        completion_params = {
+            "model": deployment,
+            "messages": messages,
+            #"temperature": 0.2,  # Lower temperature for more deterministic results - not supported by O1
+            # Note: seed parameter is not supported by o1 models with vision (images)
+        }
+        
+        # Add reasoning parameters
+        if model_config['reasoning_param']:
+            completion_params.update(model_config['reasoning_param'])
+            logger.info(f"Reasoning effort: {model_config['reasoning_param'].get('reasoning_effort', 'default')}")
+        
+        # Add max tokens
+        completion_params[model_config['max_tokens_param']] = model_config['max_tokens_value']
+        
+        # Add response format for structured output
+        if model_config['response_format']:
+            completion_params['response_format'] = model_config['response_format']
+            logger.info("Requesting structured JSON output from the model")
     
-    # Add response_format parameter for JSON output if template was provided
-    if json_template:
-        completion_params["response_format"] = {"type": "json_object"}
-        logger.info("Requesting structured JSON output from the model")
-    
-    # Send the request to the o1 model
-    logger.info("Sending request to o1 model...")
+    # Send the request to the model
+    logger.info(f"Sending request to {deployment} model...")
     
     # Print detailed debugging information before making the API call
     logger.debug("="*60)
@@ -656,7 +839,13 @@ def main():
     logger.debug(f"Model/Deployment: {completion_params['model']}")
     logger.debug(f"API Endpoint: {endpoint}")
     logger.debug(f"API Version: {client._api_version}")
-    logger.debug(f"Number of messages: {len(completion_params['messages'])}")
+    
+    # Model-aware message count logging
+    if model_type == 'gpt5':
+        logger.debug(f"Number of input items: {len(completion_params['input'])}")
+    else:
+        logger.debug(f"Number of messages: {len(completion_params['messages'])}")
+    
     logger.debug(f"Total images in request: {total_images}")
     
     # Print request parameters (excluding image data for brevity)
@@ -676,6 +865,22 @@ def main():
                 debug_msg['content'] = content_summary
             debug_messages.append(debug_msg)
         debug_params['messages'] = debug_messages
+    elif 'input' in debug_params and isinstance(debug_params['input'], list):
+        # Debug GPT-5.x input format (array of messages with role and content)
+        debug_input = []
+        for msg in debug_params['input']:
+            if isinstance(msg, dict) and 'content' in msg:
+                debug_msg = msg.copy()
+                content_summary = []
+                for item in msg['content']:
+                    if item.get('type') == 'input_text':
+                        text_preview = item['text'][:100] + ('...' if len(item['text']) > 100 else '')
+                        content_summary.append(f"input_text: '{text_preview}'")
+                    elif item.get('type') == 'input_image':
+                        content_summary.append("input_image: [base64 data]")
+                debug_msg['content'] = content_summary
+                debug_input.append(debug_msg)
+        debug_params['input'] = debug_input
     
     logger.debug(f"Request parameters: {json.dumps(debug_params, indent=2)}")
     logger.debug("="*60)
@@ -684,7 +889,12 @@ def main():
     api_start_time = time.time()
     
     try:
-        completion = client.chat.completions.create(**completion_params)
+        # Call appropriate API based on model type
+        if model_type == 'gpt5':
+            completion = client.responses.create(**completion_params)
+        else:
+            completion = client.chat.completions.create(**completion_params)
+        
         api_duration = time.time() - api_start_time
         logger.info(f"API request completed in {api_duration:.2f} seconds")
     except Exception as e:
@@ -729,33 +939,61 @@ def main():
         logger.info("Retrying with simplified parameters...")
         logger.debug("="*60)
         
-        # Create a simplified parameter set (removing reasoning_effort)
-        fallback_params = {
-            "model": deployment,
-            "messages": messages
-            #,            "temperature": 0.2   #not supported by O1
-        }
-        
-        # Use appropriate max tokens parameter based on API version
-        if api_version.startswith("2024"):
-            fallback_params["max_completion_tokens"] = 15000
+        # Create a simplified parameter set based on model type
+        if model_type == 'gpt5':
+            # GPT-5.x fallback (remove reasoning parameters)
+            # Wrap input_content in a message structure with role
+            fallback_params = {
+                "model": deployment,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": input_content
+                    }
+                ]
+            }
+            # Use appropriate max tokens parameter
+            fallback_params["max_output_tokens"] = 15000
+            # Keep response_format if template was provided
+            if json_template:
+                fallback_params["response_format"] = {"type": "json_object"}
         else:
-            fallback_params["max_tokens"] = 15000
+            # O1/O3 fallback (removing reasoning_effort)
+            fallback_params = {
+                "model": deployment,
+                "messages": messages
+                #,            "temperature": 0.2   #not supported by O1
+            }
             
-        # Keep response_format if template was provided
-        if json_template:
-            fallback_params["response_format"] = {"type": "json_object"}
+            # Use appropriate max tokens parameter based on API version
+            if api_version.startswith("2024"):
+                fallback_params["max_completion_tokens"] = 15000
+            else:
+                fallback_params["max_tokens"] = 15000
+                
+            # Keep response_format if template was provided
+            if json_template:
+                fallback_params["response_format"] = {"type": "json_object"}
         
         # Log fallback parameters
         logger.debug("FALLBACK REQUEST DEBUG:")
-        logger.debug(f"Fallback parameters: {json.dumps({k: v for k, v in fallback_params.items() if k != 'messages'}, indent=2)}")
-        logger.debug(f"Messages count: {len(fallback_params['messages'])}")
+        if model_type == 'gpt5':
+            logger.debug(f"Fallback parameters: {json.dumps({k: v for k, v in fallback_params.items() if k != 'input'}, indent=2)}")
+            logger.debug(f"Input items count: {len(fallback_params['input'])}")
+        else:
+            logger.debug(f"Fallback parameters: {json.dumps({k: v for k, v in fallback_params.items() if k != 'messages'}, indent=2)}")
+            logger.debug(f"Messages count: {len(fallback_params['messages'])}")
         
         # Time the fallback API request
         fallback_start_time = time.time()
         
         try:
-            completion = client.chat.completions.create(**fallback_params)
+            # Call appropriate API based on model type
+            if model_type == 'gpt5':
+                completion = client.responses.create(**fallback_params)
+            else:
+                completion = client.chat.completions.create(**fallback_params)
+            
             fallback_duration = time.time() - fallback_start_time
             logger.info(f"Fallback request succeeded in {fallback_duration:.2f} seconds!")
         except Exception as fallback_error:
@@ -793,18 +1031,40 @@ def main():
     logger.info("API REQUEST SUCCESSFUL!")
     logger.info("="*60)
     
-    # Get the response content
-    response_content = completion.choices[0].message.content
-    
-    # Extract and report token usage and response details
-    prompt_tokens = completion.usage.prompt_tokens
-    completion_tokens = completion.usage.completion_tokens
-    total_tokens = completion.usage.total_tokens
+    # Get the response content based on model type
+    if model_type == 'gpt5':
+        # GPT-5.x uses output_text
+        response_content = completion.output_text
+        
+        # Extract token usage if available
+        if hasattr(completion, 'usage') and completion.usage:
+            prompt_tokens = completion.usage.input_tokens if hasattr(completion.usage, 'input_tokens') else 0
+            completion_tokens = completion.usage.output_tokens if hasattr(completion.usage, 'output_tokens') else 0
+            total_tokens = prompt_tokens + completion_tokens
+        else:
+            prompt_tokens = 0
+            completion_tokens = 0
+            total_tokens = 0
+    else:
+        # O1/O3 use choices structure
+        response_content = completion.choices[0].message.content
+        
+        # Extract token usage
+        prompt_tokens = completion.usage.prompt_tokens
+        completion_tokens = completion.usage.completion_tokens
+        total_tokens = completion.usage.total_tokens
     
     logger.info("Response Details:")
-    logger.info(f"  Model used: {completion.model}")
-    logger.info(f"  Response ID: {completion.id}")
-    logger.info(f"  Finish reason: {completion.choices[0].finish_reason}")
+    logger.info(f"  Model used: {completion.model if hasattr(completion, 'model') else deployment}")
+    logger.info(f"  Response ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
+    
+    # Get finish reason based on model type
+    if model_type == 'gpt5':
+        finish_reason = completion.finish_reason if hasattr(completion, 'finish_reason') else 'N/A'
+    else:
+        finish_reason = completion.choices[0].finish_reason if hasattr(completion, 'choices') else 'N/A'
+    
+    logger.info(f"  Finish reason: {finish_reason}")
     logger.info(f"  Response length: {len(response_content)} characters")
     
     logger.info("Token Usage Summary:")
@@ -815,7 +1075,7 @@ def main():
     
     # Log the response (truncated if too long for DEBUG level)
     if logger.isEnabledFor(logging.DEBUG):
-        logger.debug("O1 Response:")
+        logger.debug(f"{model_type.upper()} Model Response:")
         if len(response_content) > 1000:
             # Log first 500 and last 500 characters if response is long
             logger.debug(response_content[:500] + "...\\n...\\n..." + response_content[-500:])

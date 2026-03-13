@@ -21,7 +21,7 @@ cd "$O1_ASSESSMENT_DIR"
 
 # Check for and activate virtual environment
 VENV_PATH="$ROOT_DIR/.venv"
-VENV_ACTIVATE="$VENV_PATH/bin/activate"
+VENV_ACTIVATE="$VENV_PATH/Scripts/activate"
 
 if [ -f "$VENV_ACTIVATE" ]; then
     echo -e "\033[0;36mFound virtual environment. Activating...\033[0m"

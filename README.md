@@ -165,7 +165,19 @@ in the vscode environment, open a terminal and execute the following commands to
     az login
     (or azd auth login)
     
-    cccccc
+
+    -----
+    Note: if az login gives an error saying az not found... you need to install the azure cli and optionally also the azure developer cli:
+
+    
+    # Azure CLI
+    winget install -e --id Microsoft.AzureCLI
+
+    # Azure Developer CLI
+    winget install -e --id Microsoft.Azd
+
+    now retry : az login
+    -------  
 
     python awreason.py --pdf_file1 ".\sample_pdfs\Managing your driving and vehicle licenses in Autoria.pdf" --promptfile ".\prompts\sample_prompt.txt" --output ".\sample_grading_results"
 
@@ -658,3 +670,162 @@ python composite_image_creator.py extracted_images/doc1/1.png extracted_images/d
 The utility can be integrated into larger document processing workflows for assessment and analysis tasks.
 
 ---
+
+## AWReason Engine – Service Bus Queue Worker
+
+The AWReason engine can run as a **Service Bus–driven queue worker** for
+auto-scaling on Azure Container Apps with KEDA. The queue worker
+supplements the existing HTTP API (under `wrappers/http-service/`) and
+shares the same assessment engine.
+
+### Architecture
+
+```
+┌─────────────┐   enqueue    ┌──────────────────┐   PeekLock   ┌─────────────────────┐
+│ awr-platform│ ──────────▶  │ SB: engine-runs  │ ──────────▶  │ queue-worker (ACA)  │
+└─────────────┘              └──────────────────┘              │  - deserialise msg   │
+                                                               │  - idempotency check │
+                                                               │  - run awreason      │
+                                                               │  - upload artefacts  │
+                                                               │  - report result     │
+                                                               └─────────────────────┘
+                                                                       │
+                                              ┌────────────────────────┤
+                                              ▼                        ▼
+                                    REPORT_MODE="http"      REPORT_MODE="servicebus"
+                                    PATCH /runs/{runId}     send to SB results queue
+```
+
+### Contracts
+
+All messages between the platform and the engine use strict Pydantic v2
+models defined in `contracts/models.py`:
+
+| Model | Direction | Transport |
+|---|---|---|
+| `RunMessage` | Platform → Engine | Service Bus `engine-runs` |
+| `RunResultMessage` | Engine → Platform | Service Bus (when `REPORT_MODE=servicebus`) |
+| `FinishRunRequest` | Engine → Platform | HTTP PATCH (when `REPORT_MODE=http`) |
+
+**Sample `RunMessage` JSON:**
+
+```json
+{
+  "message_id": "a1b2c3d4-...",
+  "run_id": "e5f6a7b8-...",
+  "engine": "awreason",
+  "correlation_id": "c9d0e1f2-...",
+  "enqueued_at": "2026-02-13T10:00:00Z",
+  "parameters": {
+    "cv_blob_uris": [
+      "https://stor.blob.core.windows.net/uploads/cv1.pdf"
+    ],
+    "prompt_blob_uri": "https://stor.blob.core.windows.net/uploads/prompt.txt",
+    "run_profile": {
+      "join_mode": "horizontal"
+    },
+    "return_artifacts": true,
+    "output": {
+      "results_container": "results",
+      "results_prefix": "runs"
+    },
+    "aoai": {
+      "deployment": "o1",
+      "api_version": "2024-12-01-preview",
+      "max_output_tokens": 15000
+    }
+  }
+}
+```
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SB_NAMESPACE` | Yes | — | Service Bus fully-qualified namespace |
+| `SB_QUEUE` | No | `engine-runs` | Inbound queue name |
+| `SB_RESULTS_QUEUE` | Cond. | — | Outbound queue (if `REPORT_MODE=servicebus`) |
+| `REPORT_MODE` | No | `http` | `"servicebus"` or `"http"` |
+| `PLATFORM_API_BASE_URL` | Cond. | — | Platform API base URL (if `REPORT_MODE=http`) |
+| `PLATFORM_AUDIENCE` | Cond. | — | AAD audience for token (if `REPORT_MODE=http`) |
+| `BLOB_ACCOUNT_URL` | Yes | — | Storage account URL |
+| `BLOB_RESULTS_CONTAINER` | No | `results` | Container for output artefacts |
+| `BLOB_RESULTS_PREFIX` | No | `runs` | Blob path prefix |
+| `APIM_AOAI_BASE_URL` | No | — | APIM gateway to AOAI |
+| `AOAI_DEPLOYMENT` | No | — | AOAI deployment name |
+| `AOAI_API_VERSION` | No | — | AOAI API version |
+| `PER_REPLICA_CONCURRENCY` | No | `1` | Max concurrent runs per replica |
+| `WORKDIR_BASE` | No | `/work` | Ephemeral working directory root |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | — | OpenTelemetry OTLP endpoint |
+| `LOG_LEVEL` | No | `INFO` | Python log level |
+| `PLATFORM_CONTRACT_URL` | No | — | Remote schema URL for contract validation |
+
+### Idempotency
+
+Before processing a message the worker checks for a **blob marker** at
+`<results_prefix>/<run_id>/_marker.json`. If the marker exists the
+message is a duplicate delivery and processing is skipped – the worker
+immediately reports success. The marker is written after artefacts are
+uploaded.
+
+### Per-Run Cleanup
+
+Every run executes inside a disposable working directory
+(`/work/run-<GUID>`) managed by a context manager. The directory is
+**always** cleaned up in a `finally` block, even on failure.
+
+### Correlation ID Propagation
+
+The `correlation_id` from the inbound `RunMessage` is:
+- Set on the Python `contextvars` for structured log enrichment.
+- Forwarded as `X-Correlation-ID` header on HTTP PATCH callbacks.
+- Set as `correlation_id` on outbound Service Bus messages.
+
+### Running Locally (Dev Queue)
+
+```bash
+# Set minimal env vars
+export SB_NAMESPACE="<your-namespace>.servicebus.windows.net"
+export BLOB_ACCOUNT_URL="https://<your-acct>.blob.core.windows.net"
+export REPORT_MODE="http"
+export PLATFORM_API_BASE_URL="http://localhost:5000/api"
+export PLATFORM_AUDIENCE="api://awr-platform"
+export PYTHONPATH="."
+
+# Authenticate
+az login
+
+# Run the worker
+python -m wrappers.queue-worker.main
+```
+
+### Running in a Container
+
+```bash
+# Build (from repo root)
+docker build -f docker/worker.Dockerfile -t awreason-queue-worker .
+
+# Run
+docker run --rm \
+  -e SB_NAMESPACE="<ns>.servicebus.windows.net" \
+  -e BLOB_ACCOUNT_URL="https://<acct>.blob.core.windows.net" \
+  -e REPORT_MODE="http" \
+  -e PLATFORM_API_BASE_URL="https://platform.example.com/api" \
+  -e PLATFORM_AUDIENCE="api://awr-platform" \
+  awreason-queue-worker
+```
+
+### Queue Worker Entrypoint
+
+```
+wrappers/queue-worker/main.py
+```
+
+Runs as: `python -m wrappers.queue-worker.main`
+
+### Tests
+
+```bash
+pip install pytest
+PYTHONPATH=. pytest tests/ -v
+```
