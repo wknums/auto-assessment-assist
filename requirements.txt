@@ -1,6 +1,6 @@
 openpyxl
 #promptflow.client
-promptflow
+#promptflow
 openai
 azure-search-documents
 azure-identity
@@ -12,6 +12,7 @@ python-dotenv
 markdown
 pyppeteer
 streamlit 
+requests
 # Added for DOCX -> Markdown conversion when using context .docx files
 python-docx
 markdownify

@@ -1,0 +1,104 @@
+# Approach: Default ignore all, then explicitly unignore what we want to track
+
+# Ignore everything by default
+*
+
+# Unignore top-level directories first
+!/experiments/
+!/infra/
+!/o1-assessment/
+!/sample_project/
+
+# Unignore specific top-level files
+!/LICENSE
+!/README.md
+!/requirements.txt
+!/.env_sample
+!/auto_assess.py
+!/content_document.json
+!/run_awreason_ux.ps1
+!/run_awreason_ux.sh
+
+# Unignore specific files in experiments directory
+!/o1-assessment/xlsx2json.py
+!/o1-assessment/run_frontend.py
+
+# Unignore frontend  directory
+!/o1-assessment/frontend/
+!/o1-assessment/frontend/assess-ux.py
+!/o1-assessment/frontend/azure_openai_client.py
+!/o1-assessment/frontend/auth.py
+
+!/o1-assessment/frontend/static/
+!/o1-assessment/frontend/static/Ai-Grading.jpg
+
+# Unignore infra directories and their contents
+!/infra/rag/
+!/infra/rag/python/
+!/infra/rag/python/**
+!/infra/rag/sample_data/
+!/infra/rag/sample_data/**
+!/infra/rag/chunk_md.py
+!/infra/rag/content_document.json
+!/infra/rag/README.md
+!/infra/rag/Readme.md
+!/infra/rag/requirements.txt
+!/infra/rag/doc2md.py
+!/infra/rag/doc2md_utils.py
+!/infra/rag/index_schema.json
+!/infra/rag/rag_this.py
+!/infra/rag/ragconfig-sample.json
+!/infra/rag/.env_sample
+!/infra/rag/.env.sample
+
+# Unignore o1-assessment directories and their contents
+!/o1-assessment/pdf2png_cli.py
+!/o1-assessment/pdf2png_utils.py
+!/o1-assessment/awreason.py
+!/o1-assessment/README.md
+!/o1-assessment/prompts/
+!/o1-assessment/prompts/sample_prompt.txt
+!/o1-assessment/sample_pdfs/
+!/o1-assessment/sample_pdfs/Managing your driving and vehicle licenses in Autoria.pdf
+!/o1-assessment/grading_results/
+!/o1-assessment/grading_results/Managing your driving and vehicle licenses in Autoria.txt
+!/o1-assessment/xlsx2md.py
+
+# Include sample_project folder and its content
+!/sample_project/**
+
+# Explicitly re-ignore specific items
+**/__pycache__/
+**/logs/
+/o1-assessment/grading_results/a1 sample.txt
+/o1-assessment/grading_results/a2 sample.txt
+/o1-assessment/grading_results0/
+/o1-assessment/grading_results1/
+/o1-assessment/imagedir/
+/o1-assessment/pdf2png.ipynb
+/o1-assessment/sample_pdfs/A1 Gearbox design template V1.pdf
+/o1-assessment/sample_pdfs/ai sample 1.pdf
+/o1-assessment/sample_pdfs/ai sample 2.pdf
+
+
+# Unignore wrappers/http-service
+!/wrappers/
+!/wrappers/http-service/
+!/wrappers/http-service/README.md
+!/wrappers/http-service/requirements.txt
+!/wrappers/http-service/Dockerfile
+!/wrappers/http-service/.dockerignore
+!/wrappers/http-service/pyrightconfig.json
+!/wrappers/http-service/app/
+!/wrappers/http-service/app/**
+!/wrappers/http-service/deploy/
+!/wrappers/http-service/deploy/**
+!/wrappers/http-service/supervisord.conf
+
+# Re-ignore sensitive/generated items in wrappers/http-service
+/wrappers/http-service/.env
+/wrappers/http-service/work/
+/wrappers/http-service/tests/last_e2e_response.json
+/wrappers/http-service/app/__pycache__/
+
+~$*

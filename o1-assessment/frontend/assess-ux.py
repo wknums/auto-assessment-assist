@@ -10,6 +10,9 @@ import base64
 import json
 from datetime import datetime
 
+# Import authentication module
+from auth import require_auth, get_user_display, logout, is_running_on_azure
+
 # Import Azure OpenAI client utilities
 try:
     from azure_openai_client import (
@@ -21,6 +24,14 @@ try:
 except ImportError as e:
     AZURE_OPENAI_AVAILABLE = False
     print(f"Warning: Azure OpenAI client not available: {e}")
+
+# Import API client for API execution mode
+try:
+    from api_client import run_assessment_via_api, check_api_health
+    API_CLIENT_AVAILABLE = True
+except ImportError as e:
+    API_CLIENT_AVAILABLE = False
+    print(f"Warning: API client not available: {e}")
 
 # Get the absolute path to the o1-assessment directory
 CURRENT_FILE = Path(__file__).resolve()
@@ -556,6 +567,18 @@ def display_chat_history():
                     )
 
 def main():
+    # ── Authentication gate (only enforced on Azure) ─────────────────
+    user_claims = require_auth()
+    if user_claims is None:
+        return  # login page is being shown
+
+    # Show signed-in user in sidebar (Azure only)
+    if is_running_on_azure():
+        with st.sidebar:
+            st.markdown(f"**Signed in as:** {get_user_display(user_claims)}")
+            if st.button("Sign out"):
+                logout()
+
     # Initialize chat session
     initialize_chat_session()
     
@@ -577,7 +600,7 @@ def main():
         """, unsafe_allow_html=True)
     
     # Create tabs for different sections
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Assessment Setup", "Advanced Options", "Batch Processing (Beta) ⚠️", "Chat Assistant", "Help & Info"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Assessment Setup", "Advanced Options", "Batch Processing", "Chat Assistant", "Help & Info"])
     
     with tab1:
         st.markdown("<h2 class='section-header'>1. Upload Assessment Prompt</h2>", unsafe_allow_html=True)
@@ -897,6 +920,37 @@ def main():
     with tab2:
         st.markdown("<h2 class='section-header'>Advanced Configuration</h2>", unsafe_allow_html=True)
         
+        # Execution mode selection
+        st.subheader("Execution Mode")
+        execution_mode = st.radio(
+            "How to run the assessment",
+            options=["direct", "api"],
+            format_func=lambda x: "Direct (subprocess)" if x == "direct" else "API (HTTP service)",
+            help="Direct mode runs awreason.py as a subprocess. API mode sends the request to the AWReason HTTP service.",
+            horizontal=True,
+        )
+        
+        if execution_mode == "api":
+            from dotenv import load_dotenv
+            load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+            api_endpoint = os.environ.get("AWR_API_ENDPOINT", "http://127.0.0.1:8080")
+            st.info(f"API endpoint: **{api_endpoint}**  \nAPI docs: [{api_endpoint}/docs]({api_endpoint}/docs)")
+            
+            if not API_CLIENT_AVAILABLE:
+                st.error("API client module could not be loaded. Make sure `requests` is installed.")
+            else:
+                if st.button("Check API Health", key="check_api_health"):
+                    with st.spinner("Checking API health..."):
+                        health = check_api_health(api_endpoint)
+                    if health["alive"] and health["ready"]:
+                        st.success("API is alive and ready.")
+                    elif health["alive"]:
+                        st.warning(f"API is alive but NOT ready: {'; '.join(health['errors'])}")
+                    else:
+                        st.error(f"API is not reachable: {'; '.join(health['errors'])}")
+        
+        st.markdown("---")
+        
         # Image joining options
         st.subheader("Image Processing Options")
         join_option = st.radio(
@@ -915,8 +969,7 @@ def main():
         )
     
     with tab3:
-        st.markdown("<h2 class='section-header'>Batch Document Processing (Beta)</h2>", unsafe_allow_html=True)
-        st.warning("⚠️ **Beta Feature**: This batch processing capability has not been fully tested. Please verify results carefully.")
+        st.markdown("<h2 class='section-header'>Batch Document Processing</h2>", unsafe_allow_html=True)
         st.info("Upload multiple .docx or .pdf files and process them all at once using a common prompt and optional JSON template.")
         
         # Multi-run configuration
@@ -1373,6 +1426,12 @@ def main():
                     
                     # Track run files for potential aggregation
                     run_files_list = []
+                    # Generate a batch ID for API mode when doing multi-run
+                    _doc_batch_id = None
+                    _api_aggregation_uri = None
+                    if execution_mode == "api" and API_CLIENT_AVAILABLE and num_runs_per_doc > 1:
+                        import uuid as _uuid
+                        _doc_batch_id = _uuid.uuid4().hex
                     
                     try:
                         # Save document file
@@ -1439,7 +1498,95 @@ def main():
                             
                             output_file_path = Path(batch_output_dir) / output_file_name
                             console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
-                            
+
+                            # ── API mode: send to the AWReason HTTP service ──
+                            if execution_mode == "api" and API_CLIENT_AVAILABLE:
+                                from dotenv import load_dotenv
+                                load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+                                _api_ep = os.environ.get("AWR_API_ENDPOINT", "http://127.0.0.1:8080")
+
+                                # Build file lists for API call
+                                _api_pdfs = []
+                                _api_md = None
+                                if batch_reference_path:
+                                    ref_lower = batch_reference_file.name.lower()
+                                    if ref_lower.endswith('.pdf'):
+                                        _api_pdfs.append(str(batch_reference_path))
+                                    else:
+                                        _api_md = str(batch_reference_path)
+                                if is_pdf:
+                                    _api_pdfs.append(str(pdf_path))
+                                else:
+                                    if _api_md and md_path:
+                                        # Both reference and doc are text – combine
+                                        _combined = temp_dir_path / f"combined_api_{idx}_{run_num}.md"
+                                        with open(batch_reference_path, 'r', encoding='utf-8') as rf:
+                                            _rc = rf.read()
+                                        with open(md_path, 'r', encoding='utf-8') as df:
+                                            _dc = df.read()
+                                        with open(_combined, 'w', encoding='utf-8') as cf:
+                                            cf.write(f"# Reference Document\n\n{_rc}\n\n# Document to Assess\n\n{_dc}")
+                                        _api_md = str(_combined)
+                                    elif md_path:
+                                        _api_md = str(md_path)
+
+                                _co_batch = {"text": console_log}
+                                def _bstatus(msg):
+                                    status_text.info(msg)
+                                def _bconsole(msg):
+                                    _co_batch["text"] += msg
+                                    console_output_batch.markdown(
+                                        f'<div class="console-output">{_co_batch["text"]}</div>',
+                                        unsafe_allow_html=True,
+                                    )
+
+                                _run_meta = {}
+                                api_result_path = run_assessment_via_api(
+                                    prompt_file_path=str(batch_prompt_path),
+                                    pdf_files=_api_pdfs,
+                                    json_template_path=str(batch_json_path) if batch_json_path else None,
+                                    md_file_path=_api_md,
+                                    output_dir=str(batch_output_dir),
+                                    endpoint=_api_ep,
+                                    batch_id=_doc_batch_id,
+                                    run_number=run_num if _doc_batch_id else None,
+                                    total_runs=num_runs_per_doc if _doc_batch_id else None,
+                                    aggregation_method=aggregation_method if (_doc_batch_id and enable_aggregation) else None,
+                                    status_callback=_bstatus,
+                                    console_callback=_bconsole,
+                                    out_metadata=_run_meta,
+                                )
+                                console_log = _co_batch["text"]
+                                if _run_meta.get("aggregation_uri"):
+                                    _api_aggregation_uri = _run_meta["aggregation_uri"]
+
+                                if api_result_path:
+                                    import shutil
+                                    api_out = Path(api_result_path)
+                                    if api_out.exists() and api_out != output_file_path:
+                                        shutil.move(str(api_out), str(output_file_path))
+                                    run_files_list.append(str(output_file_path))
+                                    if num_runs_per_doc > 1:
+                                        console_log += f"  ✓ Run {run_num} completed (API): {output_file_name}\n"
+                                    else:
+                                        console_log += f"✓ COMPLETED (API): {doc_file.name} -> {output_file_name}\n"
+                                else:
+                                    console_log += f"ERROR: API call failed for {doc_file.name}"
+                                    if num_runs_per_doc > 1:
+                                        console_log += f" (Run {run_num}/{num_runs_per_doc})"
+                                    console_log += "\n"
+                                    if num_runs_per_doc == 1:
+                                        batch_results.append({
+                                            'file': doc_file.name,
+                                            'status': 'failed',
+                                            'error': 'API call returned no result',
+                                            'output': None
+                                        })
+
+                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                continue
+
+                            # ── Direct subprocess mode ──
                             awreason_path = REPO_ROOT / "awreason.py"
                             cmd_analyze = [
                                 sys.executable, str(awreason_path),
@@ -1660,7 +1807,11 @@ def main():
                             aggregated_path = None
                             variance_info = None
                             
-                            if num_runs_per_doc > 1 and enable_aggregation and len(run_files_list) >= 2:
+                            if _api_aggregation_uri:
+                                # Server-side aggregation already done – skip local aggregation
+                                console_log += f"\n  ✓ Aggregation handled server-side → {_api_aggregation_uri}\n"
+                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                            elif num_runs_per_doc > 1 and enable_aggregation and len(run_files_list) >= 2:
                                 console_log += f"\n  Aggregating {len(run_files_list)} runs using {aggregation_method}...\n"
                                 console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                                 
@@ -1714,6 +1865,8 @@ def main():
                             }
                             if aggregated_path:
                                 result_data['aggregated_path'] = str(aggregated_path)
+                            if _api_aggregation_uri:
+                                result_data['aggregation_uri'] = _api_aggregation_uri
                             if variance_info:
                                 result_data['variance'] = variance_info
                             if md_path:
@@ -2428,19 +2581,55 @@ def main():
             console_output += "Starting assessment process...\n"
             console_placeholder.markdown(f'<div class="console-output">{console_output}</div>', unsafe_allow_html=True)
             
-            # Run the assessment
-            result_file = run_assessment(
-                str(prompt_path),
-                pdf_paths,
-                join_option,
-                str(json_template_path) if json_template_path else None,
-                output_dir,
-                status_placeholder,
-                console_placeholder,
-                console_output,
-                md_file_path=str(md_path) if md_path else None,
-                image_folder=str(images_dir) if image_paths else None
-            )
+            # Run the assessment (direct or API mode)
+            if execution_mode == "api" and API_CLIENT_AVAILABLE:
+                # API mode: call the AWReason HTTP service
+                from dotenv import load_dotenv
+                load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+                api_endpoint = os.environ.get("AWR_API_ENDPOINT", "http://127.0.0.1:8080")
+                console_output += f"Using API mode: {api_endpoint}\n"
+                console_placeholder.markdown(f'<div class="console-output">{console_output}</div>', unsafe_allow_html=True)
+
+                # Mutable container for console output accumulation inside callbacks
+                _co = {"text": console_output}
+
+                def _api_status(msg):
+                    status_placeholder.info(msg)
+
+                def _api_console(msg):
+                    _co["text"] += msg
+                    console_placeholder.markdown(
+                        f'<div class="console-output">{_co["text"]}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                result_file = run_assessment_via_api(
+                    prompt_file_path=str(prompt_path),
+                    pdf_files=pdf_paths,
+                    join_option=join_option,
+                    json_template_path=str(json_template_path) if json_template_path else None,
+                    md_file_path=str(md_path) if md_path else None,
+                    image_folder=str(images_dir) if image_paths else None,
+                    output_dir=output_dir,
+                    endpoint=api_endpoint,
+                    status_callback=_api_status,
+                    console_callback=_api_console,
+                )
+                console_output = _co["text"]
+            else:
+                # Direct mode: run awreason.py as a subprocess
+                result_file = run_assessment(
+                    str(prompt_path),
+                    pdf_paths,
+                    join_option,
+                    str(json_template_path) if json_template_path else None,
+                    output_dir,
+                    status_placeholder,
+                    console_placeholder,
+                    console_output,
+                    md_file_path=str(md_path) if md_path else None,
+                    image_folder=str(images_dir) if image_paths else None
+                )
             
             # Display results
             if result_file:

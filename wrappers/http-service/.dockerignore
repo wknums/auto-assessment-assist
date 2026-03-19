@@ -1,0 +1,39 @@
+# ── Build artifacts & caches ──────────────────────────────────────────
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+dist/
+build/
+.eggs/
+
+# ── Environment / secrets ────────────────────────────────────────────
+.env
+*.env
+!settings.sample.env
+
+# ── IDE / editor ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Version control ──────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Test / CI artifacts ──────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+tests/
+
+# ── Docs (not needed in image) ───────────────────────────────────────
+README.md
+docs/
+deploy/
+*.md

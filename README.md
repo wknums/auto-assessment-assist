@@ -115,6 +115,54 @@ AZURE_TENANT_ID="your-tenant-id-here"
 AZURE_SUBSCRIPTION_ID="your-subscription-id-here"
 ```
 
+### AWReason Engine API Authentication
+
+The AWReason HTTP engine API (`wrappers/http-service`) uses a separate
+authentication layer controlled by the `AUTH_MODE` environment variable.
+This determines how callers must authenticate when making requests to the
+engine endpoints (e.g. `/assess`, `/assess/passthrough`).
+
+| Mode | `AUTH_MODE` | Use case | What callers send |
+|------|-----------|----------|-------------------|
+| **No auth** | `none` | Local dev / Streamlit | Nothing — all requests accepted |
+| **API key** | `apikey` | Test / staging on Azure | `X-Api-Key` header + optional `X-User-Id` and `X-User-Role` headers |
+| **Entra ID** | `entra` | Production on Azure | `Authorization: Bearer <JWT>` header |
+
+**API Key mode** is designed for scenarios where your frontend uses its own
+user/password login system and you want to protect the engine API without
+setting up Entra ID app registrations. The frontend authenticates its own
+users, then attaches a shared API key and the user's identity to every
+engine call:
+
+```
+X-Api-Key: <shared-secret>
+X-User-Id: jane.doe
+X-User-Role: hiring_manager
+```
+
+**Entra ID mode** provides full JWT validation (RS256 signature, audience,
+issuer, expiration) via Microsoft Entra ID. Callers obtain tokens using
+MSAL or `DefaultAzureCredential` with the client-credentials flow.
+
+**Example `.env` for each mode:**
+
+```bash
+# Local dev — no auth
+AUTH_MODE=none
+
+# Staging on Azure — API key
+AUTH_MODE=apikey
+API_KEY=my-strong-random-secret-here
+
+# Production — Entra ID
+AUTH_MODE=entra
+AAD_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0
+AAD_AUDIENCE=api://<app-registration-client-id>
+```
+
+Health endpoints (`/healthz`, `/ready`) are always unauthenticated
+regardless of mode.
+
 ### Logging Configuration
 
 The accelerator includes Azure-compliant logging with automatic rotation and performance tracking:

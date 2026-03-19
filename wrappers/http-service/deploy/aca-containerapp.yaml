@@ -1,0 +1,162 @@
+# ══════════════════════════════════════════════════════════════════════
+#  Azure Container Apps – awreason HTTP Service manifest
+# ══════════════════════════════════════════════════════════════════════
+#
+#  Deploy with:
+#    az containerapp create --resource-group <rg> \
+#        --yaml deploy/aca-containerapp.yaml
+#
+#  Or update an existing app:
+#    az containerapp update --resource-group <rg> \
+#        --name awreason-http-service \
+#        --yaml deploy/aca-containerapp.yaml
+# ══════════════════════════════════════════════════════════════════════
+
+type: Microsoft.App/containerApps
+location: {{ LOCATION }}              # e.g. eastus2
+name: awreason-http-service
+
+identity:
+  type: UserAssigned
+  userAssignedIdentities:
+    # Replace with the resource ID of your User-Assigned Managed Identity
+    "{{ MANAGED_IDENTITY_RESOURCE_ID }}": {}
+
+properties:
+  managedEnvironmentId: "{{ CONTAINER_APP_ENV_ID }}"
+
+  configuration:
+    activeRevisionsMode: Single
+    ingress:
+      external: true
+      targetPort: 8501
+      transport: auto
+      # Allow enough time for long-running assessments (awreason CLI timeout is 300s)
+      clientRequestTimeout: 600
+      # Optional: restrict traffic to specific IP ranges / VNet
+      # ipSecurityRestrictions: []
+
+  template:
+    containers:
+      - name: awreason-http-service
+        image: "{{ ACR_LOGIN_SERVER }}/awreason-http-service:{{ IMAGE_TAG }}"
+        resources:
+          cpu: 1.0
+          memory: 2Gi
+        env:
+          # ── General ──────────────────────────────────────
+          - name: APP_NAME
+            value: awreason-http-service
+          - name: LOG_LEVEL
+            value: INFO
+
+          # ── Working directory ────────────────────────────
+          - name: WORKDIR_BASE
+            value: /work
+
+          # ── Concurrency ─────────────────────────────────
+          - name: PER_REPLICA_CONCURRENCY
+            value: "1"
+
+          # ── Azure Blob Storage ──────────────────────────
+          - name: AZ_STORAGE_NAME
+            value: "{{ AZ_STORAGE_NAME }}"
+          - name: AZ_STORAGE_RG
+            value: "{{ AZ_STORAGE_RG }}"
+          - name: BLOB_CONTAINER_RESULTS
+            value: results
+          - name: BLOB_CONTAINER_UPLOADS
+            value: uploads
+
+          # ── Azure OpenAI (direct) ───────────────────────
+          - name: AZURE_OPENAI_ENDPOINT
+            value: "{{ AZURE_OPENAI_ENDPOINT }}"
+          # API key: only if NOT using MI; prefer Entra ID.
+          # - name: AZURE_OPENAI_API_KEY
+          #   secretRef: aoai-api-key
+
+          # ── APIM AI Gateway (optional) ──────────────────
+          - name: APIM_AOAI_BASE_URL
+            value: "{{ APIM_AOAI_BASE_URL }}"
+          - name: AOAI_DEPLOYMENT
+            value: "{{ AOAI_DEPLOYMENT }}"
+          - name: AOAI_API_VERSION
+            value: "2024-12-01-preview"
+          - name: USE_AAD_FOR_AOAI
+            value: "true"
+
+          # ── Auth (Entra ID JWT) ─────────────────────────
+          - name: AUTH_REQUIRED
+            value: "false"          # Set to "true" in production
+          - name: AAD_ISSUER
+            value: "{{ AAD_ISSUER }}"
+          - name: AAD_AUDIENCE
+            value: "{{ AAD_AUDIENCE }}"
+
+          # ── Azure identity ──────────────────────────────
+          - name: AZURE_TENANT_ID
+            value: "{{ AZURE_TENANT_ID }}"
+          - name: AZURE_SUBSCRIPTION_ID
+            value: "{{ AZURE_SUBSCRIPTION_ID }}"
+
+          # ── Streamlit Entra ID auth ─────────────────
+          - name: CONTAINER_APP_NAME
+            value: awreason-http-service
+          - name: AAD_CLIENT_ID
+            value: "{{ AAD_CLIENT_ID }}"
+          - name: AAD_CLIENT_SECRET
+            secretRef: aad-client-secret
+          - name: AWR_API_ENDPOINT
+            value: "http://localhost:8080"
+          - name: AZURE_CLIENT_ID
+            value: "{{ MANAGED_IDENTITY_CLIENT_ID }}"
+
+          # ── awreason runner ─────────────────────────────
+          - name: AWREASON_CLI_CMD
+            value: /app/o1-assessment/awreason.py
+          - name: AWREASON_CLI_TIMEOUT
+            value: "300"
+
+          # ── Telemetry (optional) ────────────────────────
+          - name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: "{{ OTEL_ENDPOINT }}"
+          - name: OTEL_SERVICE_NAME
+            value: awreason-http-service
+
+        volumeMounts:
+          - volumeName: workdir-emptydir
+            mountPath: /work
+
+        probes:
+          - type: Liveness
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            failureThreshold: 3
+          - type: Readiness
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+
+    volumes:
+      - name: workdir-emptydir
+        storageType: EmptyDir
+
+    scale:
+      minReplicas: 1
+      maxReplicas: 10
+      rules:
+        - name: http-scale
+          http:
+            metadata:
+              concurrentRequests: "5"
+
+  # ── Secrets (optional – only if using API-key auth) ─────────
+  # secrets:
+  #   - name: aoai-api-key
+  #     value: "{{ AZURE_OPENAI_API_KEY }}"

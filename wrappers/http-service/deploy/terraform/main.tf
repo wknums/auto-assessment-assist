@@ -1,0 +1,315 @@
+# ══════════════════════════════════════════════════════════════════════
+#  Terraform module – Azure Container App for awreason HTTP Service
+# ══════════════════════════════════════════════════════════════════════
+#
+#  This is an OPTIONAL convenience module.  It provisions:
+#    • A User-Assigned Managed Identity
+#    • A Container App in an existing Container Apps Environment
+#    • Role assignments for Blob Storage and Cognitive Services
+#
+#  Usage:
+#    terraform init
+#    terraform plan -var-file=terraform.tfvars
+#    terraform apply
+# ══════════════════════════════════════════════════════════════════════
+
+terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 3.80"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+
+# ── Variables ─────────────────────────────────────────────────────────
+
+variable "resource_group_name" {
+  type        = string
+  description = "Name of the existing resource group."
+}
+
+variable "location" {
+  type        = string
+  default     = "eastus2"
+  description = "Azure region."
+}
+
+variable "container_app_env_id" {
+  type        = string
+  description = "Resource ID of the Container Apps Environment."
+}
+
+variable "acr_login_server" {
+  type        = string
+  description = "ACR login server (e.g. myacr.azurecr.io)."
+}
+
+variable "image_tag" {
+  type        = string
+  default     = "latest"
+  description = "Container image tag."
+}
+
+variable "blob_account_id" {
+  type        = string
+  description = "Resource ID of the Blob Storage account."
+}
+
+variable "az_storage_name" {
+  type        = string
+  description = "Azure Storage account name."
+}
+
+variable "az_storage_rg" {
+  type        = string
+  description = "Resource group containing the Azure Storage account."
+}
+
+variable "aoai_account_id" {
+  type        = string
+  description = "Resource ID of the Azure OpenAI / Cognitive Services account."
+}
+
+variable "azure_openai_endpoint" {
+  type        = string
+  description = "Azure OpenAI endpoint URL."
+}
+
+variable "aoai_deployment" {
+  type        = string
+  default     = "o1"
+  description = "Azure OpenAI deployment name."
+}
+
+variable "apim_aoai_base_url" {
+  type        = string
+  default     = ""
+  description = "APIM AI Gateway base URL (leave empty to call AOAI directly)."
+}
+
+variable "aad_issuer" {
+  type        = string
+  default     = ""
+  description = "Entra ID / AAD token issuer URL."
+}
+
+variable "aad_audience" {
+  type        = string
+  default     = ""
+  description = "Expected JWT audience."
+}
+
+variable "aad_client_id" {
+  type        = string
+  default     = ""
+  description = "App Registration client ID for Streamlit Entra ID auth."
+}
+
+variable "aad_client_secret" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "App Registration client secret for Streamlit Entra ID auth."
+}
+
+# ── Managed Identity ──────────────────────────────────────────────────
+
+resource "azurerm_user_assigned_identity" "awreason" {
+  name                = "id-awreason-http-service"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+}
+
+# ── Role: Storage Blob Data Contributor on the storage account ───────
+
+resource "azurerm_role_assignment" "blob_contributor" {
+  scope                = var.blob_account_id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = azurerm_user_assigned_identity.awreason.principal_id
+}
+
+# ── Role: Cognitive Services OpenAI User on the AOAI resource ────────
+
+resource "azurerm_role_assignment" "aoai_user" {
+  scope                = var.aoai_account_id
+  role_definition_name = "Cognitive Services OpenAI User"
+  principal_id         = azurerm_user_assigned_identity.awreason.principal_id
+}
+
+# ── Container App ─────────────────────────────────────────────────────
+
+resource "azurerm_container_app" "awreason" {
+  name                         = "awreason-http-service"
+  container_app_environment_id = var.container_app_env_id
+  resource_group_name          = var.resource_group_name
+  revision_mode                = "Single"
+
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.awreason.id]
+  }
+
+  ingress {
+    external_enabled = true
+    target_port      = 8501
+    transport        = "auto"
+
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
+  }
+
+  # NOTE: The ACA ingress request timeout defaults to 240s.  Assessments
+  # can take up to 300s.  After deploying, run:
+  #   az containerapp ingress update -n awreason-http-service \
+  #       -g <rg> --request-timeout 600
+
+  template {
+    min_replicas = 1
+    max_replicas = 10
+
+    volume {
+      name         = "workdir-emptydir"
+      storage_type = "EmptyDir"
+    }
+
+    container {
+      name   = "awreason-http-service"
+      image  = "${var.acr_login_server}/awreason-http-service:${var.image_tag}"
+      cpu    = 1.0
+      memory = "2Gi"
+
+      volume_mounts {
+        name = "workdir-emptydir"
+        path = "/work"
+      }
+
+      env {
+        name  = "WORKDIR_BASE"
+        value = "/work"
+      }
+
+      env {
+        name  = "PER_REPLICA_CONCURRENCY"
+        value = "1"
+      }
+
+      env {
+        name  = "AZ_STORAGE_NAME"
+        value = var.az_storage_name
+      }
+
+      env {
+        name  = "AZ_STORAGE_RG"
+        value = var.az_storage_rg
+      }
+
+      env {
+        name  = "AZURE_OPENAI_ENDPOINT"
+        value = var.azure_openai_endpoint
+      }
+
+      env {
+        name  = "APIM_AOAI_BASE_URL"
+        value = var.apim_aoai_base_url
+      }
+
+      env {
+        name  = "AOAI_DEPLOYMENT"
+        value = var.aoai_deployment
+      }
+
+      env {
+        name  = "AOAI_API_VERSION"
+        value = "2024-12-01-preview"
+      }
+
+      env {
+        name  = "USE_AAD_FOR_AOAI"
+        value = "true"
+      }
+
+      env {
+        name  = "AUTH_REQUIRED"
+        value = "false"
+      }
+
+      env {
+        name  = "AAD_ISSUER"
+        value = var.aad_issuer
+      }
+
+      env {
+        name  = "AAD_AUDIENCE"
+        value = var.aad_audience
+      }
+
+      env {
+        name  = "AZURE_CLIENT_ID"
+        value = azurerm_user_assigned_identity.awreason.client_id
+      }
+
+      env {
+        name  = "AWREASON_CLI_CMD"
+        value = "/app/o1-assessment/awreason.py"
+      }
+
+      env {
+        name  = "CONTAINER_APP_NAME"
+        value = "awreason-http-service"
+      }
+
+      env {
+        name  = "AAD_CLIENT_ID"
+        value = var.aad_client_id
+      }
+
+      env {
+        name      = "AAD_CLIENT_SECRET"
+        secret_name = "aad-client-secret"
+      }
+
+      env {
+        name  = "AWR_API_ENDPOINT"
+        value = "http://localhost:8080"
+      }
+
+      liveness_probe {
+        transport = "HTTP"
+        path      = "/healthz"
+        port      = 8080
+
+        initial_delay    = 5
+        interval_seconds = 30
+        failure_count_threshold = 3
+      }
+
+      readiness_probe {
+        transport = "HTTP"
+        path      = "/ready"
+        port      = 8080
+
+        initial_delay    = 10
+        interval_seconds = 15
+        failure_count_threshold = 3
+      }
+    }
+  }
+}
+
+# ── Outputs ───────────────────────────────────────────────────────────
+
+output "container_app_fqdn" {
+  value = azurerm_container_app.awreason.ingress[0].fqdn
+}
+
+output "managed_identity_client_id" {
+  value = azurerm_user_assigned_identity.awreason.client_id
+}

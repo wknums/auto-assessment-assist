@@ -85,8 +85,9 @@ def get_model_config(model_type, api_version, json_template=None, reasoning_effo
         config['api_method'] = 'chat.completions'
         config['message_key'] = 'messages'
         
-        # For newer API versions (2024-02-01-preview and later)
-        if api_version.startswith("2024"):
+        # For newer API versions (2024+ and later), use max_completion_tokens
+        # which is required by o1/o3/o4 models
+        if api_version >= "2024":
             config['max_tokens_param'] = 'max_completion_tokens'
             # Add reasoning_effort only if we're not using structured output
             if not json_template:
@@ -966,7 +967,7 @@ def main():
             }
             
             # Use appropriate max tokens parameter based on API version
-            if api_version.startswith("2024"):
+            if api_version >= "2024":
                 fallback_params["max_completion_tokens"] = 15000
             else:
                 fallback_params["max_tokens"] = 15000
