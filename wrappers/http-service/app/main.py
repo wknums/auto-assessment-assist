@@ -63,6 +63,7 @@ app = FastAPI(
     title="awreason HTTP Service",
     description="Cloud-ready HTTP wrapper around the awreason assessment engine.",
     version="0.1.0",
+    root_path="/api",
     lifespan=lifespan,
 )
 

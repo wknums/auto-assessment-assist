@@ -123,29 +123,74 @@ docker run -p 8080:8080 \
 
 ## Deploy to Azure Container Apps
 
-### Option A – YAML manifest
+All deployment configuration is driven from the **repo-root `.env`** file.
+The `AZ_*_REUSE` flags control whether each resource is reused (must exist)
+or auto-created if missing.
 
-1. Push the image to your ACR:
-   ```bash
-   az acr build --registry <acr> --image awreason-http-service:latest \
-       -f wrappers/http-service/Dockerfile .
-   ```
-
-2. Replace the `{{ }}` placeholders in `deploy/aca-containerapp.yaml`.
-
-3. Deploy:
-   ```bash
-   az containerapp create --resource-group <rg> \
-       --yaml deploy/aca-containerapp.yaml
-   ```
-
-### Option B – Terraform
+### Step 1 – Setup identity & app registration
 
 ```bash
+cd wrappers/http-service/deploy
+bash setup-identity.sh              # creates all (prompts before .env update)
+bash setup-identity.sh --yes        # creates all, auto-approve .env updates
+bash setup-identity.sh mi           # managed identity + roles only
+bash setup-identity.sh app          # app registration only
+bash setup-identity.sh status       # show current state
+bash setup-identity.sh mi --yes     # MI + roles, auto-approve
+```
+
+This script:
+- Creates a **User-Assigned Managed Identity** and assigns *Storage Blob Data Contributor* + *Cognitive Services OpenAI User* roles.
+- Creates an **Entra ID App Registration** with a client secret, `User.Read` permission, and redirect URIs (localhost + ACA FQDN).
+- At the end, displays all pending `.env` changes (old → new) and prompts for confirmation before writing.
+- Pass `-y` / `--yes` to skip the interactive prompt and auto-approve.
+- Respects `AZ_IDENTITIES_REUSE` – when `TRUE`, the MI must already exist.
+
+> **Caveat:** If you decline the `.env` write and re-run, `AAD_CLIENT_SECRET` will
+> still be empty in `.env`, so the script will call `az ad app credential reset`
+> to generate a new secret — **invalidating any previously generated one**. This is
+> expected since the old value was never persisted.
+
+### Step 2 – Deploy (infra + build + apply)
+
+```bash
+bash deploy.sh                  # full deploy: infra → build → terraform apply (with confirmation)
+bash deploy.sh all              # same as above
+bash deploy.sh allforce         # full deploy: infra → build → apply (no confirmation)
+bash deploy.sh infra            # ensure ACR, ACA env, storage exist
+bash deploy.sh build            # build & push image via ACR Tasks
+bash deploy.sh apply            # terraform apply only (with confirmation)
+bash deploy.sh applyforce       # terraform apply only (no confirmation)
+bash deploy.sh yaml             # deploy via ACA YAML (no Terraform)
+```
+
+The deploy script:
+- **Auto-creates** ACR, Container Apps Environment, and Storage Account when `AZ_*_REUSE=FALSE` and the resource doesn't exist.  Generated names are written back to `.env`.
+- **Fails fast** when `AZ_*_REUSE=TRUE` and the resource is missing.
+- Builds the Docker image **remotely** via `az acr build` (no local Docker needed).
+- Generates `terraform.tfvars` from `.env` via `gen-tfvars.sh`, then runs `terraform plan/apply`.
+
+### REUSE flags
+
+| Flag | `TRUE` | `FALSE` |
+|------|--------|--------|
+| `AZ_STORAGE_REUSE` | Must exist | Creates if missing |
+| `AZ_ACR_REUSE` | Must exist | Creates Basic SKU ACR |
+| `AZ_CONTAINER_APP_ENV_REUSE` | Must exist | Creates ACA Environment |
+| `AZ_IDENTITIES_REUSE` | Must exist | Creates MI + role assignments |
+
+### Manual alternatives
+
+**Option A – YAML manifest** (after `setup-identity.sh` and `deploy.sh infra`):
+```bash
+bash deploy.sh yaml
+```
+
+**Option B – Terraform only:**
+```bash
 cd deploy/terraform
-terraform init
-terraform plan -var-file=terraform.tfvars
-terraform apply
+bash gen-tfvars.sh
+terraform init && terraform apply -var-file=terraform.tfvars
 ```
 
 ---
@@ -194,10 +239,15 @@ wrappers/http-service/
 │   ├── cleanup.py            # per-run workdir context manager
 │   ├── utils.py              # GUID, timing, MIME helpers
 │   └── settings.sample.env   # example env values
+├── supervisord.conf          # runs API + Streamlit in one container
 ├── deploy/
-│   ├── aca-containerapp.yaml # ACA YAML manifest
+│   ├── deploy.sh             # main deployment script (.env-driven)
+│   ├── setup-identity.sh     # MI, role assignments, App Registration
+│   ├── aca-containerapp.yaml # ACA YAML manifest (template)
 │   └── terraform/
-│       └── main.tf           # optional Terraform module
+│       ├── main.tf           # Terraform module
+│       └── gen-tfvars.sh     # generates terraform.tfvars from .env
 └── tests/
-    └── test_smoke.py         # pytest smoke + integration stubs
+    ├── test_smoke.py         # pytest smoke + integration stubs
+    └── test_assess_e2e.py    # end-to-end assessment test
 ```

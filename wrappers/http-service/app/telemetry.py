@@ -67,9 +67,14 @@ def setup_logging() -> None:
     handler.setFormatter(JSONFormatter())
     root.addHandler(handler)
 
-    # ── File handler (logs/ folder at repo root) ─────────────────────
-    # Resolve logs dir relative to the repo root (3 levels up from this file)
-    repo_root = Path(__file__).resolve().parents[3]
+    # ── File handler (logs/ folder) ─────────────────────────────────
+    # In containers the app is at /app/app/ (only 2 levels deep), so
+    # parents[3] would fail.  Use WORKDIR_BASE/logs or fall back to a
+    # relative path from the repo root when running locally.
+    try:
+        repo_root = Path(__file__).resolve().parents[3]
+    except IndexError:
+        repo_root = Path(os.environ.get("WORKDIR_BASE", "/work"))
     logs_dir = repo_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 

@@ -830,7 +830,13 @@ async def _run_batch_aggregation(
     import sys
 
     # Make aggregate_scores importable
-    repo_root = Path(__file__).resolve().parents[3]  # wrappers/http-service/app -> repo root
+    resolved = Path(__file__).resolve()
+    # Local dev: wrappers/http-service/app → repo root (parents[3])
+    # Docker:    /app/app/ → /app (parents[1])
+    if len(resolved.parents) > 3:
+        repo_root = resolved.parents[3]
+    else:
+        repo_root = resolved.parents[1]
     o1_dir = repo_root / "o1-assessment"
     if str(o1_dir) not in sys.path:
         sys.path.insert(0, str(o1_dir))

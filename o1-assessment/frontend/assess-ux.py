@@ -40,6 +40,10 @@ REPO_ROOT = FRONTEND_DIR.parent  # o1-assessment directory
 O1_ASSESSMENT_DIR = REPO_ROOT    # same as o1-assessment directory
 STATIC_DIR = FRONTEND_DIR / "static"  # Static assets directory
 
+# Writable base for results: use WORKDIR_BASE in containers, else local dir
+_WORKDIR_BASE = Path(os.environ.get("WORKDIR_BASE", ""))
+RESULTS_BASE = _WORKDIR_BASE if _WORKDIR_BASE.is_dir() else O1_ASSESSMENT_DIR
+
 # Add the o1-assessment directory to the path to be able to import awreason
 sys.path.append(str(O1_ASSESSMENT_DIR))
 
@@ -736,7 +740,7 @@ def main():
         st.markdown("<h2 class='section-header'>3. Set Output Directory</h2>", unsafe_allow_html=True)
         
         # Default output directory
-        default_output_dir = str(O1_ASSESSMENT_DIR / "grading_results")
+        default_output_dir = str(RESULTS_BASE / "grading_results")
         
         # Initialize session state for output directory if not exists
         if 'assessment_output_directory' not in st.session_state:
@@ -1151,7 +1155,7 @@ def main():
         st.markdown("### 6. Set Output Directory")
         
         # Default output directory
-        default_batch_dir = str(O1_ASSESSMENT_DIR / "batch_results")
+        default_batch_dir = str(RESULTS_BASE / "batch_results")
         
         # Initialize session state for batch output directory if not exists
         if 'batch_output_directory' not in st.session_state:
@@ -1450,31 +1454,30 @@ def main():
                             console_log += f"Step 1: Converting to markdown...\n"
                             console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                             
-                            docx2md_path = REPO_ROOT / "docx2md.py"
-                            cmd_convert = [
-                                sys.executable, str(docx2md_path),
-                                "--docx_file", str(doc_path),
-                                "--md_file", str(md_path),
-                                "--mode", "convert"
-                            ]
-                            
-                            result = subprocess.run(cmd_convert, capture_output=True, text=True, cwd=str(O1_ASSESSMENT_DIR))
-                            console_log += result.stdout
-                            if result.stderr:
-                                console_log += result.stderr
-                            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
-                            
-                            if result.returncode != 0:
-                                error_msg = f"ERROR: Failed to convert {doc_file.name} to markdown\n"
+                            try:
+                                from awreason import convert_docx_to_md
+                                result_md_path = convert_docx_to_md(str(doc_path), str(Path(batch_output_dir)))
+                                if result_md_path and Path(result_md_path).exists():
+                                    # Rename to our expected filename if different
+                                    if str(Path(result_md_path)) != str(md_path):
+                                        import shutil
+                                        shutil.move(result_md_path, str(md_path))
+                                    console_log += f"✓ Converted to markdown: {md_file_name}\n"
+                                else:
+                                    raise RuntimeError("convert_docx_to_md returned empty or non-existent path")
+                            except Exception as conv_err:
+                                error_msg = f"ERROR: Failed to convert {doc_file.name} to markdown: {conv_err}\n"
                                 console_log += error_msg
                                 console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                                 batch_results.append({
                                     'file': doc_file.name,
                                     'status': 'failed',
-                                    'error': 'Markdown conversion failed',
+                                    'error': f'Markdown conversion failed: {conv_err}',
                                     'output': None
                                 })
                                 continue
+                            
+                            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                         else:
                             console_log += f"Step 1: Using PDF directly (no conversion needed)...\n"
                             console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
@@ -1787,12 +1790,30 @@ def main():
                                     # Multi-run mode: just continue to next run
                                     continue
                             
+                            # Verify the output file was actually created
+                            if not output_file_path.exists():
+                                error_msg = f"ERROR: awreason.py returned exit 0 but output file not created: {output_file_name}\n"
+                                error_msg += f"Details: {last_error_output[:500]}\n" if last_error_output else ""
+                                console_log += error_msg
+                                console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
+                                if num_runs_per_doc == 1:
+                                    batch_results.append({
+                                        'file': doc_file.name,
+                                        'status': 'failed',
+                                        'error': 'Output file not created despite exit code 0',
+                                        'details': last_error_output[:1000] if last_error_output else "No error details",
+                                        'output': None
+                                    })
+                                    break
+                                else:
+                                    continue
+
                             # Success for this run
                             if num_runs_per_doc > 1:
-                                console_log += f"  ✓ Run {run_num} completed: {output_file_name}\\n"
+                                console_log += f"  ✓ Run {run_num} completed: {output_file_name}\n"
                             else:
-                                console_log += f"✓ COMPLETED: {doc_file.name} -> {output_file_name}\\n"
-                            console_output_batch.markdown(f'<div class=\"console-output\">{console_log}</div>', unsafe_allow_html=True)
+                                console_log += f"✓ COMPLETED: {doc_file.name} -> {output_file_name}\n"
+                            console_output_batch.markdown(f'<div class="console-output">{console_log}</div>', unsafe_allow_html=True)
                             
                             # Add to run files list
                             run_files_list.append(str(output_file_path))

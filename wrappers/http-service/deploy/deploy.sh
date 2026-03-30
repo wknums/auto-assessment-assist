@@ -1,0 +1,961 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════════════════
+#  Build, push, and deploy the awreason HTTP Service container.
+#
+#  Sources all configuration from the repo-root .env file.
+#  Automatically creates missing Azure resources UNLESS the
+#  corresponding AZ_*_REUSE flag is set to TRUE.
+#
+#  REUSE=TRUE  → resource MUST already exist; script will NOT create,
+#                drop, or recreate it.
+#  REUSE=FALSE → resource is created if it doesn't exist.  If a name
+#                is provided in .env that name is used; otherwise a
+#                sensible default is generated.
+#
+#  Usage:
+#    cd wrappers/http-service/deploy
+#    bash deploy.sh                # full deploy (infra + build + apply)
+#    bash deploy.sh infra          # ensure infra only (ACR, ACA env)
+#    bash deploy.sh build          # build & push only
+#    bash deploy.sh apply          # terraform apply only
+#    bash deploy.sh yaml           # deploy via ACA YAML (no Terraform)
+# ══════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+# Prevent Git Bash (MSYS) from converting /subscriptions/... to C:/Program Files/Git/subscriptions/...
+export MSYS_NO_PATHCONV=1
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+ENV_FILE="${REPO_ROOT}/.env"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "ERROR: .env file not found at $ENV_FILE" >&2
+  exit 1
+fi
+
+# ── Load .env (strip quotes) ─────────────────────────────────────────
+set -a
+# shellcheck disable=SC1090
+source <(sed 's/\r$//' "$ENV_FILE" | grep -v '^\s*#' | grep '=')
+set +a
+
+# ── Set active subscription so all az commands target the right one ───
+if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
+  az account set --subscription "${AZURE_SUBSCRIPTION_ID}" -o none
+else
+  echo "ERROR: AZURE_SUBSCRIPTION_ID is not set in .env" >&2
+  exit 1
+fi
+
+# ── Helpers ───────────────────────────────────────────────────────────
+
+is_reuse() {
+  # Usage: is_reuse "AZ_ACR_REUSE"
+  local val
+  val="${!1:-FALSE}"
+  [[ "${val^^}" == "TRUE" ]]
+}
+
+generate_name() {
+  # Generate a short unique suffix: first 8 chars of a hash
+  local prefix="$1"
+  local seed="${AZURE_SUBSCRIPTION_ID:-$(date +%s)}"
+  local hash
+  hash=$(echo -n "${seed}-${prefix}" | md5sum | cut -c1-8)
+  echo "${prefix}${hash}"
+}
+
+resource_exists() {
+  # Usage: resource_exists <az-show-command ...>
+  # Returns 0 if the resource exists, 1 otherwise.
+  "$@" &>/dev/null
+}
+
+update_env_var() {
+  # Write a variable back to .env so subsequent runs reuse it.
+  local var_name="$1" var_value="$2"
+  if grep -q "^${var_name}=" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s|^${var_name}=.*|${var_name}=${var_value}|" "$ENV_FILE"
+  else
+    echo "${var_name}=${var_value}" >> "$ENV_FILE"
+  fi
+  # Also export into the current shell
+  export "${var_name}=${var_value}"
+}
+
+# ── Ensure infrastructure ────────────────────────────────────────────
+
+ensure_resource_group() {
+  local rg="$1" loc="${AZ_LOCATION:-eastus2}"
+  if ! resource_exists az group show --name "$rg"; then
+    echo "  Creating resource group: $rg in $loc"
+    az group create --name "$rg" --location "$loc" -o none
+  fi
+}
+
+ensure_acr() {
+  echo ""
+  echo "── ACR ─────────────────────────────────────────────────────"
+
+  if is_reuse AZ_ACR_REUSE; then
+    echo "  AZ_ACR_REUSE=TRUE → using existing ACR: ${AZ_ACR_NAME}"
+    if [[ -z "${AZ_ACR_NAME}" ]]; then
+      echo "ERROR: AZ_ACR_REUSE=TRUE but AZ_ACR_NAME is empty." >&2
+      exit 1
+    fi
+    if ! resource_exists az acr show --name "${AZ_ACR_NAME}" --resource-group "${AZ_ACR_RG}"; then
+      echo "ERROR: ACR '${AZ_ACR_NAME}' not found in RG '${AZ_ACR_RG}' but REUSE=TRUE." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  # REUSE=FALSE → create if needed
+  local acr_name="${AZ_ACR_NAME}"
+  local acr_rg="${AZ_ACR_RG:-}"
+  if [[ -z "$acr_rg" ]]; then
+    echo "ERROR: AZ_ACR_RG is not set in .env" >&2
+    exit 1
+  fi
+
+  if [[ -z "$acr_name" ]]; then
+    acr_name=$(generate_name "acrawr")
+    echo "  No AZ_ACR_NAME set – generated: $acr_name"
+  fi
+
+  ensure_resource_group "$acr_rg"
+
+  if resource_exists az acr show --name "$acr_name" --resource-group "$acr_rg"; then
+    echo "  ACR '$acr_name' already exists – reusing."
+  else
+    echo "  Creating ACR: $acr_name (SKU=Basic) in $acr_rg"
+    az acr create \
+      --name "$acr_name" \
+      --resource-group "$acr_rg" \
+      --sku Basic \
+      --admin-enabled true \
+      --location "${AZ_LOCATION}" \
+      -o none
+    echo "  ✅ ACR created: $acr_name"
+  fi
+
+  # Persist back to .env
+  update_env_var "AZ_ACR_NAME" "$acr_name"
+  update_env_var "AZ_ACR_RG" "$acr_rg"
+  AZ_ACR_NAME="$acr_name"
+  AZ_ACR_RG="$acr_rg"
+}
+
+ensure_log_analytics() {
+  echo ""
+  echo "── Log Analytics Workspace ─────────────────────────────────"
+
+  if is_reuse AZ_LOGANALYTICS_REUSE; then
+    echo "  AZ_LOGANALYTICS_REUSE=TRUE → using existing: ${AZ_LOGANALYTICS_NAME:-<not set>}"
+    if [[ -z "${AZ_LOGANALYTICS_NAME:-}" ]]; then
+      echo "ERROR: AZ_LOGANALYTICS_REUSE=TRUE but AZ_LOGANALYTICS_NAME is empty." >&2
+      exit 1
+    fi
+    if ! resource_exists az monitor log-analytics workspace show \
+        --workspace-name "${AZ_LOGANALYTICS_NAME}" \
+        --resource-group "${AZ_LOGANALYTICS_RG}"; then
+      echo "ERROR: Log Analytics workspace '${AZ_LOGANALYTICS_NAME}' not found in RG '${AZ_LOGANALYTICS_RG}' but REUSE=TRUE." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  # REUSE=FALSE → create if needed
+  local law_name="${AZ_LOGANALYTICS_NAME:-}"
+  local law_rg="${AZ_LOGANALYTICS_RG:-${AZ_CONTAINER_APP_ENV_RG}}"
+
+  if [[ -z "$law_name" ]]; then
+    law_name=$(generate_name "law-awr-")
+    echo "  No AZ_LOGANALYTICS_NAME set – generated: $law_name"
+  fi
+
+  ensure_resource_group "$law_rg"
+
+  if resource_exists az monitor log-analytics workspace show --workspace-name "$law_name" --resource-group "$law_rg"; then
+    echo "  Log Analytics workspace '$law_name' already exists – reusing."
+  else
+    echo "  Creating Log Analytics workspace: $law_name in $law_rg"
+    az monitor log-analytics workspace create \
+      --workspace-name "$law_name" \
+      --resource-group "$law_rg" \
+      --location "${AZ_LOCATION}" \
+      -o none
+    echo "  ✅ Log Analytics workspace created: $law_name"
+  fi
+
+  update_env_var "AZ_LOGANALYTICS_NAME" "$law_name"
+  update_env_var "AZ_LOGANALYTICS_RG" "$law_rg"
+  AZ_LOGANALYTICS_NAME="$law_name"
+  AZ_LOGANALYTICS_RG="$law_rg"
+}
+
+ensure_appinsights() {
+  echo ""
+  echo "── Application Insights ────────────────────────────────────"
+
+  # Use az resource (core CLI) instead of 'az monitor app-insights'
+  # which requires the application-insights extension (pip install often fails).
+  local appi_type="Microsoft.Insights/components"
+  local api_ver="2020-02-02"
+
+  if is_reuse AZ_APPINSIGHTS_REUSE; then
+    echo "  AZ_APPINSIGHTS_REUSE=TRUE → using existing: ${AZ_APPINSIGHTS_NAME:-<not set>}"
+    if [[ -z "${AZ_APPINSIGHTS_NAME:-}" ]]; then
+      echo "ERROR: AZ_APPINSIGHTS_REUSE=TRUE but AZ_APPINSIGHTS_NAME is empty." >&2
+      exit 1
+    fi
+    if ! resource_exists az resource show \
+        --resource-type "$appi_type" \
+        --name "${AZ_APPINSIGHTS_NAME}" \
+        --resource-group "${AZ_APPINSIGHTS_RG}"; then
+      echo "ERROR: Application Insights '${AZ_APPINSIGHTS_NAME}' not found in RG '${AZ_APPINSIGHTS_RG}' but REUSE=TRUE." >&2
+      exit 1
+    fi
+    # Retrieve the connection string
+    AZ_APPINSIGHTS_CONNECTION_STRING=$(az resource show \
+      --resource-type "$appi_type" \
+      --name "${AZ_APPINSIGHTS_NAME}" \
+      --resource-group "${AZ_APPINSIGHTS_RG}" \
+      --query "properties.ConnectionString" -o tsv | tr -d '\r')
+    return
+  fi
+
+  # REUSE=FALSE → create if needed
+  local appi_name="${AZ_APPINSIGHTS_NAME:-}"
+  local appi_rg="${AZ_APPINSIGHTS_RG:-${AZ_CONTAINER_APP_ENV_RG}}"
+
+  if [[ -z "$appi_name" ]]; then
+    appi_name=$(generate_name "appi-awr-")
+    echo "  No AZ_APPINSIGHTS_NAME set – generated: $appi_name"
+  fi
+
+  # Resolve Log Analytics workspace ID for linking
+  local law_id=""
+  if [[ -n "${AZ_LOGANALYTICS_NAME:-}" ]]; then
+    law_id=$(az monitor log-analytics workspace show \
+      --workspace-name "${AZ_LOGANALYTICS_NAME}" \
+      --resource-group "${AZ_LOGANALYTICS_RG}" \
+      --query id -o tsv 2>/dev/null | tr -d '\r')
+  fi
+
+  ensure_resource_group "$appi_rg"
+
+  if resource_exists az resource show --resource-type "$appi_type" --name "$appi_name" --resource-group "$appi_rg"; then
+    echo "  Application Insights '$appi_name' already exists – reusing."
+  else
+    echo "  Creating Application Insights: $appi_name in $appi_rg"
+    local props='{"Application_Type":"web"}'
+    if [[ -n "$law_id" ]]; then
+      props="{\"Application_Type\":\"web\",\"WorkspaceResourceId\":\"${law_id}\"}"
+    fi
+    az resource create \
+      --resource-type "$appi_type" \
+      --name "$appi_name" \
+      --resource-group "$appi_rg" \
+      --location "${AZ_LOCATION}" \
+      --properties "$props" \
+      -o none
+    echo "  ✅ Application Insights created: $appi_name"
+  fi
+
+  # Retrieve the connection string
+  AZ_APPINSIGHTS_CONNECTION_STRING=$(az resource show \
+    --resource-type "$appi_type" \
+    --name "$appi_name" \
+    --resource-group "$appi_rg" \
+    --query "properties.ConnectionString" -o tsv | tr -d '\r')
+
+  update_env_var "AZ_APPINSIGHTS_NAME" "$appi_name"
+  update_env_var "AZ_APPINSIGHTS_RG" "$appi_rg"
+  AZ_APPINSIGHTS_NAME="$appi_name"
+  AZ_APPINSIGHTS_RG="$appi_rg"
+}
+
+ensure_container_app_env() {
+  echo ""
+  echo "── Container Apps Environment ──────────────────────────────"
+
+  if is_reuse AZ_CONTAINER_APP_ENV_REUSE; then
+    echo "  AZ_CONTAINER_APP_ENV_REUSE=TRUE → using existing: ${AZ_CONTAINER_APP_ENV_NAME}"
+    if [[ -z "${AZ_CONTAINER_APP_ENV_NAME}" ]]; then
+      echo "ERROR: AZ_CONTAINER_APP_ENV_REUSE=TRUE but AZ_CONTAINER_APP_ENV_NAME is empty." >&2
+      exit 1
+    fi
+    if ! resource_exists az containerapp env show \
+        --name "${AZ_CONTAINER_APP_ENV_NAME}" \
+        --resource-group "${AZ_CONTAINER_APP_ENV_RG}"; then
+      echo "ERROR: Container Apps Env '${AZ_CONTAINER_APP_ENV_NAME}' not found in RG '${AZ_CONTAINER_APP_ENV_RG}' but REUSE=TRUE." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  # REUSE=FALSE → create if needed
+  local env_name="${AZ_CONTAINER_APP_ENV_NAME}"
+  local env_rg="${AZ_CONTAINER_APP_ENV_RG:-}"
+  if [[ -z "$env_rg" ]]; then
+    echo "ERROR: AZ_CONTAINER_APP_ENV_RG is not set in .env" >&2
+    exit 1
+  fi
+
+  if [[ -z "$env_name" ]]; then
+    env_name=$(generate_name "cae-awr-")
+    echo "  No AZ_CONTAINER_APP_ENV_NAME set – generated: $env_name"
+  fi
+
+  ensure_resource_group "$env_rg"
+
+  # Resolve Log Analytics workspace ID for the environment
+  local law_customer_id="" law_shared_key=""
+  if [[ -n "${AZ_LOGANALYTICS_NAME:-}" ]]; then
+    law_customer_id=$(az monitor log-analytics workspace show \
+      --workspace-name "${AZ_LOGANALYTICS_NAME}" \
+      --resource-group "${AZ_LOGANALYTICS_RG}" \
+      --query customerId -o tsv 2>/dev/null | tr -d '\r')
+    law_shared_key=$(az monitor log-analytics workspace get-shared-keys \
+      --workspace-name "${AZ_LOGANALYTICS_NAME}" \
+      --resource-group "${AZ_LOGANALYTICS_RG}" \
+      --query primarySharedKey -o tsv 2>/dev/null | tr -d '\r')
+  fi
+
+  if resource_exists az containerapp env show --name "$env_name" --resource-group "$env_rg"; then
+    echo "  Container Apps Environment '$env_name' already exists – reusing."
+  else
+    echo "  Creating Container Apps Environment: $env_name in $env_rg"
+    local create_args=(
+      az containerapp env create
+      --name "$env_name"
+      --resource-group "$env_rg"
+      --location "${AZ_LOCATION}"
+      -o none
+    )
+    if [[ -n "$law_customer_id" ]] && [[ -n "$law_shared_key" ]]; then
+      create_args+=(--logs-workspace-id "$law_customer_id" --logs-workspace-key "$law_shared_key")
+      echo "  Linking to Log Analytics workspace: ${AZ_LOGANALYTICS_NAME}"
+    fi
+    "${create_args[@]}"
+    echo "  ✅ Container Apps Environment created: $env_name"
+  fi
+
+  # Persist back to .env
+  update_env_var "AZ_CONTAINER_APP_ENV_NAME" "$env_name"
+  update_env_var "AZ_CONTAINER_APP_ENV_RG" "$env_rg"
+  AZ_CONTAINER_APP_ENV_NAME="$env_name"
+  AZ_CONTAINER_APP_ENV_RG="$env_rg"
+}
+
+ensure_storage_firewall_allows_aca() {
+  echo ""
+  echo "── Storage Firewall: allow ACA outbound IP ─────────────────"
+
+  if [[ -z "${AZ_STORAGE_NAME:-}" ]]; then
+    echo "  ⚠️  AZ_STORAGE_NAME not set – skipping firewall rule."
+    return
+  fi
+  if [[ -z "${AZ_CONTAINER_APP_ENV_NAME:-}" ]]; then
+    echo "  ⚠️  AZ_CONTAINER_APP_ENV_NAME not set – skipping firewall rule."
+    return
+  fi
+
+  # Check if the storage account firewall is enabled (defaultAction=Deny)
+  local default_action
+  default_action=$(az storage account show \
+    --name "${AZ_STORAGE_NAME}" \
+    --resource-group "${AZ_STORAGE_RG}" \
+    --query "networkRuleSet.defaultAction" -o tsv 2>/dev/null | tr -d '\r' || true)
+
+  if [[ "${default_action}" != "Deny" ]]; then
+    echo "  Storage firewall defaultAction=${default_action:-Allow} – no IP rule needed."
+    return
+  fi
+
+  # Get the ACA environment's static outbound IP
+  local aca_static_ip
+  aca_static_ip=$(az containerapp env show \
+    --name "${AZ_CONTAINER_APP_ENV_NAME}" \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --query "properties.staticIp" -o tsv 2>/dev/null | tr -d '\r' || true)
+  aca_static_ip="${aca_static_ip:-}"
+
+  if [[ -z "$aca_static_ip" ]]; then
+    echo "  ⚠️  Could not resolve ACA environment static IP – skipping."
+    return
+  fi
+
+  # Check if the IP is already in the allow list
+  local existing
+  existing=$(az storage account network-rule list \
+    --account-name "${AZ_STORAGE_NAME}" \
+    --resource-group "${AZ_STORAGE_RG}" \
+    --query "ipRules[?ipAddressOrRange=='${aca_static_ip}'].ipAddressOrRange" \
+    -o tsv 2>/dev/null | tr -d '\r' || true)
+
+  if [[ -n "$existing" ]]; then
+    echo "  ACA outbound IP ${aca_static_ip} already allowed."
+  else
+    az storage account network-rule add \
+      --account-name "${AZ_STORAGE_NAME}" \
+      --resource-group "${AZ_STORAGE_RG}" \
+      --ip-address "${aca_static_ip}" \
+      -o none
+    echo "  ✅ Added ACA outbound IP ${aca_static_ip} to storage firewall."
+  fi
+}
+
+ensure_storage() {
+  echo ""
+  echo "── Storage Account ─────────────────────────────────────────"
+
+  if is_reuse AZ_STORAGE_REUSE; then
+    echo "  AZ_STORAGE_REUSE=TRUE → using existing: ${AZ_STORAGE_NAME}"
+    if [[ -z "${AZ_STORAGE_NAME}" ]]; then
+      echo "ERROR: AZ_STORAGE_REUSE=TRUE but AZ_STORAGE_NAME is empty." >&2
+      exit 1
+    fi
+    if ! resource_exists az storage account show --name "${AZ_STORAGE_NAME}" --resource-group "${AZ_STORAGE_RG}"; then
+      echo "ERROR: Storage account '${AZ_STORAGE_NAME}' not found in RG '${AZ_STORAGE_RG}' but REUSE=TRUE." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  # REUSE=FALSE → create if needed
+  local sa_name="${AZ_STORAGE_NAME}"
+  local sa_rg="${AZ_STORAGE_RG:-}"
+  if [[ -z "$sa_rg" ]]; then
+    echo "ERROR: AZ_STORAGE_RG is not set in .env" >&2
+    exit 1
+  fi
+
+  if [[ -z "$sa_name" ]]; then
+    sa_name=$(generate_name "stawrea")
+    echo "  No AZ_STORAGE_NAME set – generated: $sa_name"
+  fi
+
+  ensure_resource_group "$sa_rg"
+
+  if resource_exists az storage account show --name "$sa_name" --resource-group "$sa_rg"; then
+    echo "  Storage account '$sa_name' already exists – reusing."
+  else
+    echo "  Creating storage account: $sa_name in $sa_rg"
+    az storage account create \
+      --name "$sa_name" \
+      --resource-group "$sa_rg" \
+      --location "${AZ_LOCATION}" \
+      --sku Standard_LRS \
+      --kind StorageV2 \
+      -o none
+    echo "  ✅ Storage account created: $sa_name"
+  fi
+
+  update_env_var "AZ_STORAGE_NAME" "$sa_name"
+  update_env_var "AZ_STORAGE_RG" "$sa_rg"
+  AZ_STORAGE_NAME="$sa_name"
+  AZ_STORAGE_RG="$sa_rg"
+}
+
+do_infra() {
+  echo ""
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  Ensuring Azure infrastructure …"
+  echo "═══════════════════════════════════════════════════════════"
+
+  ensure_storage
+  ensure_acr
+  ensure_log_analytics
+  ensure_appinsights
+  ensure_container_app_env
+  ensure_storage_firewall_allows_aca
+
+  echo ""
+  echo "✅ Infrastructure ready."
+  echo "   ACR:      ${AZ_ACR_NAME}"
+  echo "   ACA Env:  ${AZ_CONTAINER_APP_ENV_NAME}"
+  echo "   Storage:  ${AZ_STORAGE_NAME}"
+  echo "   Log Ana:  ${AZ_LOGANALYTICS_NAME:-<none>}"
+  echo "   AppInsig: ${AZ_APPINSIGHTS_NAME:-<none>}"
+}
+
+# ── Derived values (re-evaluate after infra) ─────────────────────────
+
+refresh_derived() {
+  ACR_LOGIN_SERVER="${AZ_ACR_NAME}.azurecr.io"
+  IMAGE_NAME="awreason-http-service"
+  # Use the tag from the last build if available; otherwise git SHA; fallback to timestamp
+  if [[ -z "${AZ_IMAGE_TAG:-}" ]] || [[ "${AZ_IMAGE_TAG}" == "latest" ]]; then
+    if [[ -f "${SCRIPT_DIR}/.last_image_tag" ]]; then
+      IMAGE_TAG=$(< "${SCRIPT_DIR}/.last_image_tag")
+    else
+      IMAGE_TAG=$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD 2>/dev/null || date -u +"%Y%m%dT%H%M%S")
+    fi
+  else
+    IMAGE_TAG="${AZ_IMAGE_TAG}"
+  fi
+  FULL_IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG}"
+  DOCKERFILE="${REPO_ROOT}/wrappers/http-service/Dockerfile"
+}
+
+print_banner() {
+  echo ""
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  awreason HTTP Service – Deployment"
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  ACR:        ${ACR_LOGIN_SERVER}"
+  echo "  Image:      ${FULL_IMAGE}"
+  echo "  ACA Env:    ${AZ_CONTAINER_APP_ENV_NAME}"
+  echo "  App Name:   ${AZ_CONTAINER_APP_NAME}"
+  echo "  Location:   ${AZ_LOCATION}"
+  echo "  AOAI:       ${AZURE_OPENAI_ENDPOINT}"
+  echo "  Deployment: ${AZURE_OPENAI_DEPLOYMENT_O1}"
+  echo "  Storage:    ${AZ_STORAGE_NAME} (REUSE=${AZ_STORAGE_REUSE:-FALSE})"
+  echo "  AppInsig:   ${AZ_APPINSIGHTS_NAME:-<none>} (REUSE=${AZ_APPINSIGHTS_REUSE:-FALSE})"
+  echo "  ACR REUSE:  ${AZ_ACR_REUSE:-FALSE}"
+  echo "  ACA REUSE:  ${AZ_CONTAINER_APP_ENV_REUSE:-FALSE}"
+  echo "═══════════════════════════════════════════════════════════"
+}
+
+do_build() {
+  # Always generate a fresh tag for builds (don't read .last_image_tag)
+  ACR_LOGIN_SERVER="${AZ_ACR_NAME}.azurecr.io"
+  IMAGE_NAME="awreason-http-service"
+  if [[ -z "${AZ_IMAGE_TAG:-}" ]] || [[ "${AZ_IMAGE_TAG}" == "latest" ]]; then
+    IMAGE_TAG=$(date -u +"%Y%m%dT%H%M%S")
+  else
+    IMAGE_TAG="${AZ_IMAGE_TAG}"
+  fi
+  FULL_IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG}"
+  DOCKERFILE="${REPO_ROOT}/wrappers/http-service/Dockerfile"
+
+  echo ""
+  echo "── Building & pushing image via ACR ────────────────────────"
+  # Convert Git Bash paths to Windows paths for az CLI (a Windows process)
+  local win_repo_root win_dockerfile
+  win_repo_root=$(cygpath -w "$REPO_ROOT" 2>/dev/null || echo "$REPO_ROOT")
+  win_dockerfile=$(cygpath -w "$DOCKERFILE" 2>/dev/null || echo "$DOCKERFILE")
+  az acr build \
+    --registry "${AZ_ACR_NAME}" \
+    --resource-group "${AZ_ACR_RG}" \
+    --image "${IMAGE_NAME}:${IMAGE_TAG}" \
+    --image "${IMAGE_NAME}:latest" \
+    --file "${win_dockerfile}" \
+    "${win_repo_root}"
+
+  # Persist the tag so a subsequent 'apply' uses exactly the same one
+  echo "${IMAGE_TAG}" > "${SCRIPT_DIR}/.last_image_tag"
+  echo "✅ Image pushed: ${FULL_IMAGE} (also tagged :latest)"
+}
+
+# ── Auto-import pre-existing Azure resources into Terraform state ─────
+# Resources created outside Terraform (e.g. by setup-identity.sh) cause
+# "already exists" errors on first apply.  This function checks each
+# managed resource and imports it if it exists in Azure but not in state.
+
+_tf_try_import() {
+  # Usage: _tf_try_import <tf_address> <azure_resource_id>
+  local addr="$1" rid="$2"
+  # Skip if already in state
+  if terraform state show "$addr" &>/dev/null; then
+    echo "  ✓ $addr (already in state)"
+    return
+  fi
+  # Skip if the Azure resource doesn't actually exist
+  if [[ -z "$rid" ]]; then
+    echo "  – $addr (resource ID unknown, skipping)"
+    return
+  fi
+  echo "  ⬇ Importing $addr …"
+  if ! terraform import -var-file=terraform.tfvars "$addr" "$rid"; then
+    echo "  ⚠️  Import failed for $addr (resource may be in a bad state)"
+  fi
+}
+
+_tf_import_if_needed() {
+  local mi_rg="${AZ_CONTAINER_APP_ENV_RG}"
+  local mi_name="${AZ_MI_NAME:-id-awreason-http-service}"
+  local sub_id="${AZURE_SUBSCRIPTION_ID}"
+
+  # ── Managed Identity ────────────────────────────────────────────
+  local mi_id="/subscriptions/${sub_id}/resourceGroups/${mi_rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${mi_name}"
+  _tf_try_import "azurerm_user_assigned_identity.awreason" "$mi_id"
+
+  # ── Role Assignment: Storage Blob Data Contributor ──────────────
+  local blob_ra_id
+  blob_ra_id=$(az role assignment list \
+    --assignee "${AZ_MI_PRINCIPAL_ID:-}" \
+    --role "Storage Blob Data Contributor" \
+    --scope "/subscriptions/${sub_id}/resourceGroups/${AZ_STORAGE_RG}/providers/Microsoft.Storage/storageAccounts/${AZ_STORAGE_NAME}" \
+    --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' || true)
+  _tf_try_import "azurerm_role_assignment.blob_contributor" "${blob_ra_id:-}"
+
+  # ── Role Assignment: Cognitive Services OpenAI User ─────────────
+  local aoai_ra_id
+  aoai_ra_id=$(az role assignment list \
+    --assignee "${AZ_MI_PRINCIPAL_ID:-}" \
+    --role "Cognitive Services OpenAI User" \
+    --scope "/subscriptions/${sub_id}/resourceGroups/${AZ_AOAI_RESOURCE_RG}/providers/Microsoft.CognitiveServices/accounts/${AZ_AOAI_RESOURCE_NAME}" \
+    --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' || true)
+  _tf_try_import "azurerm_role_assignment.aoai_user" "${aoai_ra_id:-}"
+
+  # ── Role Assignment: AcrPull on the ACR ─────────────────────────
+  local acr_ra_id
+  acr_ra_id=$(az role assignment list \
+    --assignee "${AZ_MI_PRINCIPAL_ID:-}" \
+    --role "AcrPull" \
+    --scope "/subscriptions/${sub_id}/resourceGroups/${AZ_ACR_RG}/providers/Microsoft.ContainerRegistry/registries/${AZ_ACR_NAME}" \
+    --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' || true)
+  _tf_try_import "azurerm_role_assignment.acr_pull" "${acr_ra_id:-}"
+
+  # ── Container App ───────────────────────────────────────────────
+  local ca_id="/subscriptions/${sub_id}/resourceGroups/${mi_rg}/providers/Microsoft.App/containerApps/${AZ_CONTAINER_APP_NAME}"
+  _tf_try_import "azurerm_container_app.awreason" "$ca_id"
+}
+
+do_apply() {
+  _do_apply_impl "interactive"
+}
+
+do_apply_force() {
+  _do_apply_impl "force"
+}
+
+_do_apply_impl() {
+  local mode="${1:-interactive}"
+  refresh_derived
+  echo ""
+  echo "── Generating terraform.tfvars ─────────────────────────────"
+  pushd "${SCRIPT_DIR}/terraform" > /dev/null
+  bash gen-tfvars.sh "$ENV_FILE"
+
+  echo ""
+  echo "── Terraform init & apply ──────────────────────────────────"
+  terraform init -upgrade
+
+  # ── Auto-import pre-existing resources ──────────────────────────
+  # Resources created by setup-identity.sh may already exist in Azure
+  # but not in Terraform state. Import them automatically.
+  echo ""
+  echo "── Checking for pre-existing resources to import ───────────"
+  _tf_import_if_needed
+  echo ""
+
+  local proceed="n"
+  if [[ "$mode" == "force" ]]; then
+    terraform plan -var-file=terraform.tfvars
+    proceed="y"
+  else
+    terraform plan -var-file=terraform.tfvars
+    read -rp "Apply this plan? [y/N] " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+      proceed="y"
+    fi
+  fi
+
+  if [[ "$proceed" == "y" ]]; then
+    terraform apply -var-file=terraform.tfvars -auto-approve
+    echo ""
+    echo "✅ Deployment complete!"
+    echo "   (nginx proxy_read_timeout is 600s for long-running assessments)"
+    terraform output
+
+    # ── Post-deploy health check ────────────────────────────────────
+    local fqdn
+    fqdn=$(terraform output -raw container_app_fqdn 2>/dev/null || true)
+    if [[ -n "$fqdn" ]]; then
+      echo ""
+      echo "── Waiting for container to become healthy ─────────────────"
+      local url="https://${fqdn}/healthz"
+      local max_attempts=20  # 20 × 10s = ~3.3 min
+      local attempt=0
+      while (( attempt < max_attempts )); do
+        attempt=$((attempt + 1))
+        local status
+        status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null || echo "000")
+        if [[ "$status" == "200" ]]; then
+          echo "  ✅ Health check passed (HTTP $status) – $url"
+          break
+        fi
+        echo "  ⏳ Attempt $attempt/$max_attempts: HTTP $status – retrying in 10s …"
+        sleep 10
+      done
+      if (( attempt >= max_attempts )); then
+        echo "  ⚠️  Health check did not pass after ${max_attempts} attempts."
+        echo "     Check logs: az containerapp logs show --name ${AZ_CONTAINER_APP_NAME} --resource-group ${AZ_CONTAINER_APP_ENV_RG} --type console --tail 30 --follow false"
+      fi
+    fi
+  else
+    echo "Aborted."
+  fi
+  popd > /dev/null
+}
+
+do_yaml() {
+  refresh_derived
+  echo ""
+  echo "── Deploying via ACA YAML manifest ─────────────────────────"
+
+  # Resolve values for the YAML placeholders
+  MI_RESOURCE_ID=$(az identity show \
+    --name "id-awreason-http-service" \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --query id -o tsv 2>/dev/null | tr -d '\r' || true)
+  MI_RESOURCE_ID="${MI_RESOURCE_ID:-}"
+  MI_CLIENT_ID=$(az identity show \
+    --name "id-awreason-http-service" \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --query clientId -o tsv 2>/dev/null | tr -d '\r' || true)
+  MI_CLIENT_ID="${MI_CLIENT_ID:-}"
+  CONTAINER_APP_ENV_ID=$(az containerapp env show \
+    --name "${AZ_CONTAINER_APP_ENV_NAME}" \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --query id -o tsv | tr -d '\r' || true)
+
+  # Resolve Application Insights connection string
+  local appi_conn_str=""
+  if [[ -n "${AZ_APPINSIGHTS_NAME:-}" ]] && [[ -n "${AZ_APPINSIGHTS_RG:-}" ]]; then
+    appi_conn_str=$(az resource show \
+      --resource-type "Microsoft.Insights/components" \
+      --name "${AZ_APPINSIGHTS_NAME}" \
+      --resource-group "${AZ_APPINSIGHTS_RG}" \
+      --query "properties.ConnectionString" -o tsv 2>/dev/null | tr -d '\r')
+  fi
+  appi_conn_str="${appi_conn_str:-${AZ_APPINSIGHTS_CONNECTION_STRING:-}}"
+
+  # Generate resolved YAML
+  sed \
+    -e "s|{{ LOCATION }}|${AZ_LOCATION}|g" \
+    -e "s|{{ MANAGED_IDENTITY_RESOURCE_ID }}|${MI_RESOURCE_ID}|g" \
+    -e "s|{{ MANAGED_IDENTITY_CLIENT_ID }}|${MI_CLIENT_ID}|g" \
+    -e "s|{{ CONTAINER_APP_ENV_ID }}|${CONTAINER_APP_ENV_ID}|g" \
+    -e "s|{{ ACR_LOGIN_SERVER }}|${ACR_LOGIN_SERVER}|g" \
+    -e "s|{{ IMAGE_TAG }}|${IMAGE_TAG}|g" \
+    -e "s|{{ AZ_STORAGE_NAME }}|${AZ_STORAGE_NAME}|g" \
+    -e "s|{{ AZ_STORAGE_RG }}|${AZ_STORAGE_RG}|g" \
+    -e "s|{{ AZURE_OPENAI_ENDPOINT }}|${AZURE_OPENAI_ENDPOINT}|g" \
+    -e "s|{{ APIM_AOAI_BASE_URL }}||g" \
+    -e "s|{{ AOAI_DEPLOYMENT }}|${AZURE_OPENAI_DEPLOYMENT_O1}|g" \
+    -e "s|{{ AOAI_API_VERSION }}|${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}|g" \
+    -e "s|{{ AAD_ISSUER }}|https://login.microsoftonline.com/${AZURE_TENANT_ID}/v2.0|g" \
+    -e "s|{{ AAD_AUDIENCE }}|${AAD_CLIENT_ID}|g" \
+    -e "s|{{ AZURE_TENANT_ID }}|${AZURE_TENANT_ID}|g" \
+    -e "s|{{ AZURE_SUBSCRIPTION_ID }}|${AZURE_SUBSCRIPTION_ID}|g" \
+    -e "s|{{ AAD_CLIENT_ID }}|${AAD_CLIENT_ID}|g" \
+    -e "s|{{ AAD_CLIENT_SECRET }}|${AAD_CLIENT_SECRET}|g" \
+    -e "s|{{ APPINSIGHTS_CONNECTION_STRING }}|${appi_conn_str}|g" \
+    -e "s|{{ OTEL_ENDPOINT }}||g" \
+    "${SCRIPT_DIR}/aca-containerapp.yaml" > "${SCRIPT_DIR}/_resolved-aca.yaml"
+
+  echo "Generated: ${SCRIPT_DIR}/_resolved-aca.yaml"
+
+  az containerapp create \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --yaml "${SCRIPT_DIR}/_resolved-aca.yaml" \
+    2>/dev/null \
+  || az containerapp update \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --name "${AZ_CONTAINER_APP_NAME}" \
+    --yaml "${SCRIPT_DIR}/_resolved-aca.yaml"
+
+  echo ""
+  echo "✅ Deployed via YAML!"
+  echo "   (nginx proxy_read_timeout is 600s for long-running assessments)"
+}
+
+# ── Preview ───────────────────────────────────────────────────────────
+
+do_preview() {
+  refresh_derived
+
+  echo ""
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  Deployment Preview"
+  echo "═══════════════════════════════════════════════════════════"
+
+  # ── Subscription & Location ──────────────────────────────────────
+  echo ""
+  echo "── Subscription & Location ─────────────────────────────────"
+  echo "  Subscription:   ${AZURE_SUBSCRIPTION_ID}"
+  echo "  Tenant:         ${AZURE_TENANT_ID}"
+  echo "  Location:       ${AZ_LOCATION}"
+  echo "  Resource Group: ${AZ_CONTAINER_APP_ENV_RG}"
+
+  # ── Storage Account ─────────────────────────────────────────────
+  echo ""
+  echo "── Storage Account ─────────────────────────────────────────"
+  if is_reuse AZ_STORAGE_REUSE; then
+    echo "  Action: REUSE existing"
+  elif [[ -n "${AZ_STORAGE_NAME}" ]] && resource_exists az storage account show --name "${AZ_STORAGE_NAME}" --resource-group "${AZ_STORAGE_RG}"; then
+    echo "  Action: EXISTS (will reuse)"
+  else
+    echo "  Action: CREATE"
+  fi
+  echo "  Name:   ${AZ_STORAGE_NAME:-$(generate_name "stawrea") (auto-generated)}"
+  echo "  RG:     ${AZ_STORAGE_RG:-<NOT SET — add AZ_STORAGE_RG to .env>}"
+  echo "  SKU:    Standard_LRS"
+  echo "  Kind:   StorageV2"
+
+  # ── ACR ──────────────────────────────────────────────────────────
+  echo ""
+  echo "── Container Registry (ACR) ────────────────────────────────"
+  local preview_acr_name="${AZ_ACR_NAME}"
+  if [[ -z "$preview_acr_name" ]]; then
+    preview_acr_name="$(generate_name "acrawr") (auto-generated)"
+  fi
+  if is_reuse AZ_ACR_REUSE; then
+    echo "  Action: REUSE existing"
+  elif [[ -n "${AZ_ACR_NAME}" ]] && resource_exists az acr show --name "${AZ_ACR_NAME}" --resource-group "${AZ_ACR_RG}"; then
+    echo "  Action: EXISTS (will reuse)"
+  else
+    echo "  Action: CREATE"
+  fi
+  echo "  Name:   ${preview_acr_name}"
+  echo "  RG:     ${AZ_ACR_RG:-<NOT SET — add AZ_ACR_RG to .env>}"
+  echo "  SKU:    Basic"
+  echo "  Admin:  Enabled"
+
+  # ── Container Apps Environment ──────────────────────────────────
+  echo ""
+  echo "── Container Apps Environment ──────────────────────────────"
+  local preview_env_name="${AZ_CONTAINER_APP_ENV_NAME}"
+  if [[ -z "$preview_env_name" ]]; then
+    preview_env_name="$(generate_name "cae-awr-") (auto-generated)"
+  fi
+  if is_reuse AZ_CONTAINER_APP_ENV_REUSE; then
+    echo "  Action: REUSE existing"
+  elif [[ -n "${AZ_CONTAINER_APP_ENV_NAME}" ]] && resource_exists az containerapp env show --name "${AZ_CONTAINER_APP_ENV_NAME}" --resource-group "${AZ_CONTAINER_APP_ENV_RG}"; then
+    echo "  Action: EXISTS (will reuse)"
+  else
+    echo "  Action: CREATE"
+  fi
+  echo "  Name:   ${preview_env_name}"
+  echo "  RG:     ${AZ_CONTAINER_APP_ENV_RG:-<NOT SET — add AZ_CONTAINER_APP_ENV_RG to .env>}"
+  echo "  SKU:    Consumption (serverless)"
+
+  # ── Container App ───────────────────────────────────────────────
+  echo ""
+  echo "── Container App ───────────────────────────────────────────"
+  if [[ -n "${AZ_CONTAINER_APP_NAME}" ]] && resource_exists az containerapp show --name "${AZ_CONTAINER_APP_NAME}" --resource-group "${AZ_CONTAINER_APP_ENV_RG}"; then
+    echo "  Action: UPDATE existing"
+  else
+    echo "  Action: CREATE"
+  fi
+  echo "  Name:     ${AZ_CONTAINER_APP_NAME}"
+  echo "  CPU:      1.0 vCPU"
+  echo "  Memory:   2 Gi"
+  echo "  Replicas: 1–10"
+  echo "  Ingress:  External, port 8000 (nginx → API + UX)"
+
+  # ── Container Image ─────────────────────────────────────────────
+  echo ""
+  echo "── Container Image ─────────────────────────────────────────"
+  echo "  Registry:   ${ACR_LOGIN_SERVER}"
+  echo "  Image:      ${IMAGE_NAME}:${IMAGE_TAG}"
+  echo "  Dockerfile: wrappers/http-service/Dockerfile"
+  echo "  Build:      Remote (az acr build)"
+
+  # ── Managed Identity ────────────────────────────────────────────
+  echo ""
+  echo "── Managed Identity ────────────────────────────────────────"
+  echo "  Name:         ${AZ_MI_NAME:-id-awreason-http-service}"
+  echo "  Principal ID: ${AZ_MI_PRINCIPAL_ID:-<not set — run setup-identity.sh>}"
+  echo "  Client ID:    ${AZ_MI_CLIENT_ID:-<not set — run setup-identity.sh>}"
+  echo "  Roles:"
+  echo "    • Storage Blob Data Contributor → ${AZ_STORAGE_NAME:-<storage>}"
+  echo "    • Cognitive Services OpenAI User → ${AZ_AOAI_RESOURCE_NAME:-<aoai>}"
+  echo "    • AcrPull → ${AZ_ACR_NAME:-<acr>}"
+
+  # ── AOAI ────────────────────────────────────────────────────────
+  echo ""
+  echo "── Azure OpenAI ────────────────────────────────────────────"
+  echo "  Endpoint:   ${AZURE_OPENAI_ENDPOINT}"
+  echo "  Deployment: ${AZURE_OPENAI_DEPLOYMENT_O1}"
+  echo "  API Ver:    ${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}"
+  echo "  Auth:       Managed Identity (USE_AAD_FOR_AOAI=true)"
+
+  # ── Entra ID Auth (Streamlit) ───────────────────────────────────
+  echo ""
+  echo "── Entra ID Auth (Streamlit UX) ────────────────────────────"
+  echo "  App Reg:        ${AAD_APP_DISPLAY_NAME:-awreason-http-service}"
+  echo "  Client ID:      ${AAD_CLIENT_ID:-<not set — run setup-identity.sh app>}"
+  if [[ -n "${AAD_CLIENT_SECRET:-}" ]]; then
+    echo "  Client Secret:  <set>"
+  else
+    echo "  Client Secret:  <NOT SET — run setup-identity.sh app>"
+  fi
+  echo "  Tenant:         ${AAD_TENANT_ID:-${AZURE_TENANT_ID}}"
+
+  # ── Readiness check ─────────────────────────────────────────────
+  echo ""
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  Readiness Check"
+  echo "═══════════════════════════════════════════════════════════"
+
+  local ready=true
+
+  if [[ -z "${AAD_CLIENT_ID:-}" ]]; then
+    echo "  ❌ AAD_CLIENT_ID is empty — run: bash setup-identity.sh app"
+    ready=false
+  else
+    echo "  ✅ AAD_CLIENT_ID is set"
+  fi
+
+  if [[ -z "${AAD_CLIENT_SECRET:-}" ]]; then
+    echo "  ❌ AAD_CLIENT_SECRET is empty — run: bash setup-identity.sh app"
+    ready=false
+  else
+    echo "  ✅ AAD_CLIENT_SECRET is set"
+  fi
+
+  if [[ -z "${AZ_MI_PRINCIPAL_ID:-}" ]]; then
+    echo "  ❌ AZ_MI_PRINCIPAL_ID is empty — run: bash setup-identity.sh mi"
+    ready=false
+  else
+    echo "  ✅ Managed Identity configured"
+  fi
+
+  if ! command -v terraform &>/dev/null; then
+    echo "  ⚠️  terraform not found — install it, or use 'deploy.sh yaml' instead"
+  else
+    echo "  ✅ terraform available ($(terraform version -json 2>/dev/null | grep -o '"terraform_version":"[^"]*"' | cut -d'"' -f4 || terraform version | head -1))"
+  fi
+
+  echo ""
+  if [[ "$ready" == "true" ]]; then
+    echo "  ✅ Ready to deploy. Run: bash deploy.sh all"
+  else
+    echo "  ⛔ Not ready — fix the items above first."
+  fi
+}
+
+# ── Main ──────────────────────────────────────────────────────────────
+
+ACTION="${1:-all}"
+
+case "$ACTION" in
+  preview) do_preview ;;
+  infra)   do_infra; refresh_derived; print_banner ;;
+  build)   do_build ;;
+  apply)       do_apply ;;
+  applyforce)  do_apply_force ;;
+  yaml)    do_yaml ;;
+  all)          do_infra; refresh_derived; print_banner; do_build; do_apply ;;
+  allforce)     do_infra; refresh_derived; print_banner; do_build; do_apply_force ;;
+  *)
+    echo "Usage: $0 {preview|infra|build|apply|applyforce|yaml|all|allforce}" >&2
+    echo ""
+    echo "  preview     Show what will be deployed (no changes made)"
+    echo "  infra       Ensure ACR, ACA env, storage exist"
+    echo "  build       Build & push image via ACR Tasks"
+    echo "  apply       Terraform apply (with confirmation)"
+    echo "  applyforce  Terraform apply (no confirmation)"
+    echo "  yaml        Deploy via ACA YAML manifest (no Terraform)"
+    echo "  all         Full deploy: infra → build → apply"
+    echo "  allforce    Full deploy: infra → build → apply (no confirmation)"
+    exit 1
+    ;;
+esac

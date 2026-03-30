@@ -27,12 +27,13 @@ properties:
 
   configuration:
     activeRevisionsMode: Single
+    registries:
+      - server: "{{ ACR_LOGIN_SERVER }}"
+        identity: "{{ MANAGED_IDENTITY_RESOURCE_ID }}"
     ingress:
       external: true
-      targetPort: 8501
+      targetPort: 8000
       transport: auto
-      # Allow enough time for long-running assessments (awreason CLI timeout is 300s)
-      clientRequestTimeout: 600
       # Optional: restrict traffic to specific IP ranges / VNet
       # ipSecurityRestrictions: []
 
@@ -81,13 +82,13 @@ properties:
           - name: AOAI_DEPLOYMENT
             value: "{{ AOAI_DEPLOYMENT }}"
           - name: AOAI_API_VERSION
-            value: "2024-12-01-preview"
+            value: "{{ AOAI_API_VERSION }}"
           - name: USE_AAD_FOR_AOAI
             value: "true"
 
           # ── Auth (Entra ID JWT) ─────────────────────────
-          - name: AUTH_REQUIRED
-            value: "false"          # Set to "true" in production
+          - name: AUTH_MODE
+            value: "none"            # Set to "entra" in production
           - name: AAD_ISSUER
             value: "{{ AAD_ISSUER }}"
           - name: AAD_AUDIENCE
@@ -117,8 +118,8 @@ properties:
           - name: AWREASON_CLI_TIMEOUT
             value: "300"
 
-          # ── Telemetry (optional) ────────────────────────
-          - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          # ── Telemetry (optional) ────────────────────────          - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+            value: "{{ APPINSIGHTS_CONNECTION_STRING }}"          - name: OTEL_EXPORTER_OTLP_ENDPOINT
             value: "{{ OTEL_ENDPOINT }}"
           - name: OTEL_SERVICE_NAME
             value: awreason-http-service
@@ -131,14 +132,14 @@ properties:
           - type: Liveness
             httpGet:
               path: /healthz
-              port: 8080
+              port: 8000
             initialDelaySeconds: 5
             periodSeconds: 30
             failureThreshold: 3
           - type: Readiness
             httpGet:
               path: /ready
-              port: 8080
+              port: 8000
             initialDelaySeconds: 10
             periodSeconds: 15
             failureThreshold: 3
@@ -156,7 +157,10 @@ properties:
             metadata:
               concurrentRequests: "5"
 
-  # ── Secrets (optional – only if using API-key auth) ─────────
-  # secrets:
+  # ── Secrets ─────────────────────────────────────────────────
+  secrets:
+    - name: aad-client-secret
+      value: "{{ AAD_CLIENT_SECRET }}"
+  # Uncomment if using API-key auth instead of MI:
   #   - name: aoai-api-key
   #     value: "{{ AZURE_OPENAI_API_KEY }}"

@@ -54,12 +54,16 @@ def _find_awreason_script() -> str:
     if _AWREASON_SCRIPT:
         return _AWREASON_SCRIPT
 
+    candidates = []
     # Look relative to this repo first (../../o1-assessment/awreason.py)
-    repo_root = Path(__file__).resolve().parents[3]  # wrappers/http-service/app → repo root
-    candidates = [
-        repo_root / "o1-assessment" / "awreason.py",
-        Path(settings.awreason_cli_cmd),
-    ]
+    resolved = Path(__file__).resolve()
+    if len(resolved.parents) > 3:
+        # Local dev: wrappers/http-service/app → repo root
+        repo_root = resolved.parents[3]
+        candidates.append(repo_root / "o1-assessment" / "awreason.py")
+    # Docker layout: /app/app/awreason_runner.py → /app/o1-assessment/awreason.py
+    candidates.append(resolved.parents[1] / "o1-assessment" / "awreason.py")
+    candidates.append(Path(settings.awreason_cli_cmd))
     for c in candidates:
         if c.is_file():
             _AWREASON_SCRIPT = str(c.resolve())
@@ -575,7 +579,8 @@ async def run_passthrough(
     tempdir.mkdir(parents=True, exist_ok=True)
 
     base_name = (pdf_file1 or prompt_file).stem
-    out_file = results_dir / f"{base_name}-analysis.html"
+    ext = ".json" if json_template else ".html"
+    out_file = results_dir / f"{base_name}-analysis{ext}"
 
     cli_args = _build_cli_args(
         prompt_file=prompt_file,

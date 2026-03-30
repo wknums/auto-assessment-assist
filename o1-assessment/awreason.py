@@ -113,7 +113,12 @@ def setup_logging():
     log_level = getattr(logging, log_level_str, logging.INFO)
     
     # Create logs directory if it doesn't exist
-    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+    # Use WORKDIR_BASE in containers (writable), fall back to ../logs for local dev
+    workdir = os.getenv("WORKDIR_BASE", "")
+    if workdir and os.path.isdir(workdir):
+        log_dir = os.path.join(workdir, "logs")
+    else:
+        log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
     os.makedirs(log_dir, exist_ok=True)
     
     # Create log filename with date (for daily rotation)
@@ -427,7 +432,7 @@ def main():
         prompt_text = read_prompt_from_file(args.promptfile)
         if not prompt_text:
             logger.error("Failed to read prompt from file. Exiting.")
-            return
+            sys.exit(1)
     
     # If a markdown file is provided, read its content
     markdown_content = None
@@ -440,7 +445,7 @@ def main():
         markdown_content = read_markdown_file(md_file_path)
         if not markdown_content:
             logger.error("Failed to read Markdown file. Exiting.")
-            return
+            sys.exit(1)
         logger.info(f"Loaded Markdown content from: {md_file_path}")
 
         # If we also have a prompt, combine them
@@ -455,7 +460,7 @@ def main():
         json_template = read_json_template(args.jsonout_template)
         if not json_template:
             logger.error("Failed to read JSON template. Exiting.")
-            return
+            sys.exit(1)
         logger.info(f"Loaded JSON template from: {args.jsonout_template}")
         
         # Check if we need to enhance the prompt with JSON template info
@@ -483,7 +488,7 @@ def main():
     if args.pdf_file1:
         if not (os.path.isfile(args.pdf_file1) and args.pdf_file1.lower().endswith('.pdf')):
             logger.error(f"{args.pdf_file1} is not a valid PDF file. Exiting.")
-            return
+            sys.exit(1)
         pdf1_dir = process_pdf_to_images(args.pdf_file1, temp_dir, args.join)
         folder1_images = get_images_from_folder(pdf1_dir)
         folder1_name = Path(args.pdf_file1).name
@@ -493,7 +498,7 @@ def main():
     if args.pdf_file2:
         if not (os.path.isfile(args.pdf_file2) and args.pdf_file2.lower().endswith('.pdf')):
             logger.error(f"{args.pdf_file2} is not a valid PDF file. Exiting.")
-            return
+            sys.exit(1)
         pdf2_dir = process_pdf_to_images(args.pdf_file2, temp_dir, args.join)
         folder2_images = get_images_from_folder(pdf2_dir)
         folder2_name = Path(args.pdf_file2).name

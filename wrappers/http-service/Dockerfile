@@ -1,9 +1,9 @@
 # ══════════════════════════════════════════════════════════════════════
 #  awreason HTTP Service – Dockerfile
 #  Runtime: Azure Container Apps (Python 3.11-slim)
-#  Runs both the FastAPI API (port 8080) and Streamlit UX (port 8501)
+#  Runs FastAPI API (8080) + Streamlit UX (8501) behind nginx (8000)
 # ══════════════════════════════════════════════════════════════════════
-FROM python:3.11-slim AS base
+FROM mcr.microsoft.com/mirror/docker/library/python:3.11-slim AS base
 
 # ── Metadata ─────────────────────────────────────────────────────────
 LABEL maintainer="auto-assessment-assist" \
@@ -17,6 +17,7 @@ RUN groupadd --gid 1000 appuser && \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
+        nginx \
         supervisor \
         libglib2.0-0 \
         libsm6 \
@@ -27,9 +28,12 @@ RUN apt-get update && \
 # ── Python deps ──────────────────────────────────────────────────────
 WORKDIR /app
 
-COPY requirements.txt .
+COPY wrappers/http-service/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
+
+# ── Smoke-test: fail the build if critical deps are missing ──────────
+RUN python -c "import uvicorn; import streamlit; import fastapi; print('✅ deps OK')"
 
 # ── Copy the awreason engine from the main repo ─────────────────────
 # The engine lives at ../../o1-assessment relative to the Dockerfile.
@@ -44,14 +48,22 @@ COPY wrappers/http-service/app/ /app/app/
 # ── Copy supervisord config ──────────────────────────────────────────
 COPY wrappers/http-service/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
+# ── Copy nginx config ────────────────────────────────────────────────
+COPY wrappers/http-service/nginx.conf /etc/nginx/nginx.conf
+
+# ── Verify the app can be imported (catches missing deps/typos) ──────
+RUN WORKDIR_BASE=/tmp PYTHONPATH=/app:/app/o1-assessment python -c "from app.main import app; print('✅ app import OK')"
+
 # ── Create working directory for ephemeral data ──────────────────────
-RUN mkdir -p /work && chown appuser:appuser /work
+# nginx needs /var dirs writable by appuser, and /tmp for temp files
+RUN mkdir -p /work /work/grading_results && chown -R appuser:appuser /work && \
+    chown -R appuser:appuser /var/log/nginx /var/lib/nginx /run
 
 # ── Switch to non-root ───────────────────────────────────────────────
 USER appuser
 
-# ── Expose both ports ────────────────────────────────────────────────
-EXPOSE 8080 8501
+# ── Expose nginx port (API + UX behind reverse proxy) ────────────────
+EXPOSE 8000
 
 ENV PYTHONPATH="/app:/app/o1-assessment"
 ENV WORKDIR_BASE="/work"

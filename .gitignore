@@ -100,5 +100,9 @@
 /wrappers/http-service/work/
 /wrappers/http-service/tests/last_e2e_response.json
 /wrappers/http-service/app/__pycache__/
+/wrappers/http-service/deploy/terraform/terraform.tfvars
+/wrappers/http-service/deploy/terraform/.terraform/
+/wrappers/http-service/deploy/terraform/*.tfstate*
+/wrappers/http-service/deploy/_resolved-aca.yaml
 
 ~$*

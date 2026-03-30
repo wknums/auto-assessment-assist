@@ -50,6 +50,11 @@ variable "acr_login_server" {
   description = "ACR login server (e.g. myacr.azurecr.io)."
 }
 
+variable "acr_id" {
+  type        = string
+  description = "Resource ID of the Azure Container Registry."
+}
+
 variable "image_tag" {
   type        = string
   default     = "latest"
@@ -87,6 +92,12 @@ variable "aoai_deployment" {
   description = "Azure OpenAI deployment name."
 }
 
+variable "aoai_api_version" {
+  type        = string
+  default     = "2024-12-01-preview"
+  description = "Azure OpenAI API version."
+}
+
 variable "apim_aoai_base_url" {
   type        = string
   default     = ""
@@ -118,6 +129,49 @@ variable "aad_client_secret" {
   description = "App Registration client secret for Streamlit Entra ID auth."
 }
 
+variable "azure_tenant_id" {
+  type        = string
+  default     = ""
+  description = "Entra ID tenant ID for Streamlit auth."
+}
+
+variable "azure_subscription_id" {
+  type        = string
+  default     = ""
+  description = "Azure subscription ID."
+}
+
+variable "auth_mode" {
+  type        = string
+  default     = "none"
+  description = "API auth mode: none, apikey, or entra."
+}
+
+variable "api_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "Shared API key for apikey auth mode."
+}
+
+variable "log_level" {
+  type        = string
+  default     = "INFO"
+  description = "Log level for the application."
+}
+
+variable "streamlit_redirect_uri" {
+  type        = string
+  default     = ""
+  description = "Full redirect URI for Streamlit Entra ID auth (e.g. https://<fqdn>/)."
+}
+
+variable "appinsights_connection_string" {
+  type        = string
+  default     = ""
+  description = "Application Insights connection string. When set, APPLICATIONINSIGHTS_CONNECTION_STRING env var is added to the container."
+}
+
 # ── Managed Identity ──────────────────────────────────────────────────
 
 resource "azurerm_user_assigned_identity" "awreason" {
@@ -142,6 +196,14 @@ resource "azurerm_role_assignment" "aoai_user" {
   principal_id         = azurerm_user_assigned_identity.awreason.principal_id
 }
 
+# ── Role: AcrPull on the ACR ─────────────────────────────────────────
+
+resource "azurerm_role_assignment" "acr_pull" {
+  scope                = var.acr_id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_user_assigned_identity.awreason.principal_id
+}
+
 # ── Container App ─────────────────────────────────────────────────────
 
 resource "azurerm_container_app" "awreason" {
@@ -150,14 +212,26 @@ resource "azurerm_container_app" "awreason" {
   resource_group_name          = var.resource_group_name
   revision_mode                = "Single"
 
+  depends_on = [azurerm_role_assignment.acr_pull]
+
   identity {
     type         = "UserAssigned"
     identity_ids = [azurerm_user_assigned_identity.awreason.id]
   }
 
+  secret {
+    name  = "aad-client-secret"
+    value = var.aad_client_secret
+  }
+
+  secret {
+    name  = "api-key"
+    value = var.api_key
+  }
+
   ingress {
     external_enabled = true
-    target_port      = 8501
+    target_port      = 8000
     transport        = "auto"
 
     traffic_weight {
@@ -166,10 +240,10 @@ resource "azurerm_container_app" "awreason" {
     }
   }
 
-  # NOTE: The ACA ingress request timeout defaults to 240s.  Assessments
-  # can take up to 300s.  After deploying, run:
-  #   az containerapp ingress update -n awreason-http-service \
-  #       -g <rg> --request-timeout 600
+  registry {
+    server   = var.acr_login_server
+    identity = azurerm_user_assigned_identity.awreason.id
+  }
 
   template {
     min_replicas = 1
@@ -228,7 +302,7 @@ resource "azurerm_container_app" "awreason" {
 
       env {
         name  = "AOAI_API_VERSION"
-        value = "2024-12-01-preview"
+        value = var.aoai_api_version
       }
 
       env {
@@ -237,8 +311,13 @@ resource "azurerm_container_app" "awreason" {
       }
 
       env {
-        name  = "AUTH_REQUIRED"
-        value = "false"
+        name  = "AUTH_MODE"
+        value = var.auth_mode
+      }
+
+      env {
+        name        = "API_KEY"
+        secret_name = "api-key"
       }
 
       env {
@@ -281,10 +360,53 @@ resource "azurerm_container_app" "awreason" {
         value = "http://localhost:8080"
       }
 
+      env {
+        name  = "AAD_TENANT_ID"
+        value = var.azure_tenant_id
+      }
+
+      env {
+        name  = "AZURE_TENANT_ID"
+        value = var.azure_tenant_id
+      }
+
+      env {
+        name  = "AZURE_SUBSCRIPTION_ID"
+        value = var.azure_subscription_id
+      }
+
+      env {
+        name  = "AZURE_OPENAI_DEPLOYMENT_O1"
+        value = var.aoai_deployment
+      }
+
+      env {
+        name  = "AZURE_OPENAI_API_VERSION"
+        value = var.aoai_api_version
+      }
+
+      env {
+        name  = "LOG_LEVEL"
+        value = var.log_level
+      }
+
+      env {
+        name  = "STREAMLIT_REDIRECT_URI"
+        value = var.streamlit_redirect_uri
+      }
+
+      dynamic "env" {
+        for_each = var.appinsights_connection_string != "" ? [1] : []
+        content {
+          name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+          value = var.appinsights_connection_string
+        }
+      }
+
       liveness_probe {
         transport = "HTTP"
         path      = "/healthz"
-        port      = 8080
+        port      = 8000
 
         initial_delay    = 5
         interval_seconds = 30
@@ -294,7 +416,7 @@ resource "azurerm_container_app" "awreason" {
       readiness_probe {
         transport = "HTTP"
         path      = "/ready"
-        port      = 8080
+        port      = 8000
 
         initial_delay    = 10
         interval_seconds = 15
@@ -308,6 +430,16 @@ resource "azurerm_container_app" "awreason" {
 
 output "container_app_fqdn" {
   value = azurerm_container_app.awreason.ingress[0].fqdn
+}
+
+output "streamlit_url" {
+  value       = "https://${azurerm_container_app.awreason.ingress[0].fqdn}/"
+  description = "Streamlit UI"
+}
+
+output "api_base_url" {
+  value       = "https://${azurerm_container_app.awreason.ingress[0].fqdn}/api"
+  description = "FastAPI base URL (Swagger at /api/docs)"
 }
 
 output "managed_identity_client_id" {
