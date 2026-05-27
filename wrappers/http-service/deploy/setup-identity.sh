@@ -118,6 +118,7 @@ flush_env_vars() {
     echo "  --yes flag set → writing ${#PENDING_ENV[@]} variable(s)."
   else
     read -rp "  Write ${#PENDING_ENV[@]} variable(s) to .env? [y/N] " answer
+    answer="${answer//$'\r'/}"
     if [[ "${answer,,}" != "y" && "${answer,,}" != "yes" ]]; then
       echo "  Skipped. .env was NOT modified."
       return

@@ -1,0 +1,123 @@
+# ══════════════════════════════════════════════════════════════════════
+#  Azure Container Apps – awreason Queue Worker manifest
+# ══════════════════════════════════════════════════════════════════════
+#
+#  Deploy with:
+#    az containerapp create --resource-group <rg> \
+#        --yaml wrappers/queue-worker/deploy/aca-containerapp.yaml
+#
+#  Or update an existing app:
+#    az containerapp update --resource-group <rg> \
+#        --name awreason-queue-worker \
+#        --yaml wrappers/queue-worker/deploy/aca-containerapp.yaml
+#
+#  Notes:
+#  - This worker is non-HTTP. Do not configure ingress.
+#  - The KEDA rule uses the same user-assigned managed identity as the app.
+#  - Replace all {{ PLACEHOLDER }} values before deployment.
+# ══════════════════════════════════════════════════════════════════════
+
+type: Microsoft.App/containerApps
+location: {{ LOCATION }}
+name: {{ CONTAINER_APP_NAME }}
+
+identity:
+  type: UserAssigned
+  userAssignedIdentities:
+    "{{ MANAGED_IDENTITY_RESOURCE_ID }}": {}
+
+properties:
+  managedEnvironmentId: "{{ CONTAINER_APP_ENV_ID }}"
+
+  configuration:
+    activeRevisionsMode: Single
+    registries:
+      - server: "{{ ACR_LOGIN_SERVER }}"
+        identity: "{{ MANAGED_IDENTITY_RESOURCE_ID }}"
+
+  template:
+    terminationGracePeriodSeconds: 30
+
+    containers:
+      - name: {{ CONTAINER_APP_NAME }}
+        image: "{{ ACR_LOGIN_SERVER }}/awreason-queue-worker:{{ IMAGE_TAG }}"
+        resources:
+          cpu: 1.0
+          memory: 2Gi
+        env:
+          - name: LOG_LEVEL
+            value: "{{ LOG_LEVEL }}"
+
+          - name: WORKDIR_BASE
+            value: /work
+
+          - name: PER_REPLICA_CONCURRENCY
+            value: "{{ PER_REPLICA_CONCURRENCY }}"
+
+          - name: SB_NAMESPACE
+            value: "{{ SB_NAMESPACE }}"
+          - name: SB_QUEUE
+            value: "{{ SB_QUEUE }}"
+          - name: SB_RESULTS_QUEUE
+            value: "{{ SB_RESULTS_QUEUE }}"
+
+          - name: REPORT_MODE
+            value: "{{ REPORT_MODE }}"
+          - name: PLATFORM_API_BASE_URL
+            value: "{{ PLATFORM_API_BASE_URL }}"
+          - name: PLATFORM_AUDIENCE
+            value: "{{ PLATFORM_AUDIENCE }}"
+
+          - name: BLOB_ACCOUNT_URL
+            value: "{{ BLOB_ACCOUNT_URL }}"
+          - name: BLOB_RESULTS_CONTAINER
+            value: "{{ BLOB_RESULTS_CONTAINER }}"
+          - name: BLOB_RESULTS_PREFIX
+            value: "{{ BLOB_RESULTS_PREFIX }}"
+
+          - name: APIM_AOAI_BASE_URL
+            value: "{{ APIM_AOAI_BASE_URL }}"
+          - name: AOAI_DEPLOYMENT
+            value: "{{ AOAI_DEPLOYMENT }}"
+          - name: AOAI_API_VERSION
+            value: "{{ AOAI_API_VERSION }}"
+
+          - name: AZURE_TENANT_ID
+            value: "{{ AZURE_TENANT_ID }}"
+          - name: AZURE_CLIENT_ID
+            value: "{{ AZURE_CLIENT_ID }}"
+
+          - name: AWREASON_CLI_TIMEOUT
+            value: "{{ AWREASON_CLI_TIMEOUT }}"
+          - name: AWREASON_MAX_RETRIES
+            value: "{{ AWREASON_MAX_RETRIES }}"
+          - name: AWREASON_RETRY_BACKOFF
+            value: "{{ AWREASON_RETRY_BACKOFF }}"
+
+          - name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: "{{ OTEL_EXPORTER_OTLP_ENDPOINT }}"
+          - name: PLATFORM_CONTRACT_URL
+            value: "{{ PLATFORM_CONTRACT_URL }}"
+
+        volumeMounts:
+          - volumeName: workdir-emptydir
+            mountPath: /work
+
+    volumes:
+      - name: workdir-emptydir
+        storageType: EmptyDir
+
+    scale:
+      minReplicas: {{ QUEUE_WORKER_MIN_REPLICAS }}
+      maxReplicas: {{ QUEUE_WORKER_MAX_REPLICAS }}
+      pollingInterval: {{ QUEUE_WORKER_POLLING_INTERVAL }}
+      cooldownPeriod: {{ QUEUE_WORKER_COOLDOWN_PERIOD }}
+      rules:
+        - name: servicebus-queue-depth
+          custom:
+            type: azure-servicebus
+            identity: "{{ MANAGED_IDENTITY_RESOURCE_ID }}"
+            metadata:
+              queueName: "{{ SB_QUEUE }}"
+              namespace: "{{ SB_NAMESPACE_NAME }}"
+              messageCount: "{{ QUEUE_WORKER_MESSAGE_COUNT }}"

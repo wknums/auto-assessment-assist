@@ -99,6 +99,18 @@ if [[ -n "${AZ_APPINSIGHTS_NAME:-}" ]] && [[ -n "${AZ_APPINSIGHTS_RG:-}" ]]; the
   APPINSIGHTS_CONNECTION_STRING="${APPINSIGHTS_CONNECTION_STRING:-}"
 fi
 
+# ── Resolve VNet subnet ID (optional) ────────────────────────────────
+VNET_SUBNET_ID=""
+if [[ "${AZ_VNET_ENABLED:-FALSE}" == "TRUE" ]] && [[ -n "${AZ_VNET_NAME:-}" ]]; then
+  local_vnet_rg="${AZ_VNET_RG:-${AZ_CONTAINER_APP_ENV_RG}}"
+  VNET_SUBNET_ID=$(az network vnet subnet show \
+    --vnet-name "${AZ_VNET_NAME}" \
+    --name "${AZ_VNET_SUBNET_NAME:-snet-aca}" \
+    --resource-group "${local_vnet_rg}" \
+    --query id -o tsv 2>/dev/null | tr -d '\r')
+  VNET_SUBNET_ID="${VNET_SUBNET_ID:-}"
+fi
+
 # ── Write terraform.tfvars ───────────────────────────────────────────
 TFVARS="terraform.tfvars"
 cat > "$TFVARS" <<EOF
@@ -146,6 +158,9 @@ streamlit_redirect_uri = "https://${CONTAINER_APP_FQDN}/"
 
 # Application Insights
 appinsights_connection_string = "${APPINSIGHTS_CONNECTION_STRING}"
+
+# VNet integration (empty = no VNet)
+vnet_subnet_id            = "${VNET_SUBNET_ID}"
 EOF
 
 echo "✅ Generated $TFVARS" >&2

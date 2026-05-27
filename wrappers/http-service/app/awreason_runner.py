@@ -88,6 +88,7 @@ def _build_cli_args(
     md_file: Optional[Path] = None,
     json_template: Optional[Path] = None,
     join_mode: Optional[str] = None,
+    reasoning_effort: str = "high",
     images_folder1: Optional[Path] = None,
     images_folder2: Optional[Path] = None,
     output_path: Path,
@@ -112,6 +113,8 @@ def _build_cli_args(
         args += ["--jsonout_template", str(json_template)]
     if join_mode:
         args += ["--join", join_mode]
+    if reasoning_effort:
+        args += ["--reasoning-effort", reasoning_effort]
     if images_folder1:
         args += ["--images_folder1", str(images_folder1)]
     if images_folder2:
@@ -561,6 +564,7 @@ async def run_passthrough(
     md_file: Optional[Path] = None,
     json_template: Optional[Path] = None,
     join_mode: Optional[str] = None,
+    reasoning_effort: str = "high",
     images_folder1: Optional[Path] = None,
     images_folder2: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -589,6 +593,7 @@ async def run_passthrough(
         md_file=md_file,
         json_template=json_template,
         join_mode=join_mode,
+        reasoning_effort=reasoning_effort,
         images_folder1=images_folder1,
         images_folder2=images_folder2,
         output_path=out_file,

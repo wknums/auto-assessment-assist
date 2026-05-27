@@ -61,11 +61,10 @@ Note: The purpose of this Accelerator is NOT to hand over the grading of assignm
 
 -
 
-### Deployment:
+### Local Development Setup
 
-  
-
-At this stage the accelerator is expected to be deployed manually only in development mode to be executed locally on a workstation that has the vscode interactive development environment as well as git and python (V3.11 or 3.12) as well as Azure Developer CLI (azd) installed.
+The accelerator can be run locally on a workstation that has VS Code, Git,
+and Python (V3.11 or 3.12) installed.
 
   
 
@@ -86,6 +85,114 @@ edit the .env file:
 copy the endpoint of your Azure OpenAI resource and paste it into the value for the AZURE_OPENAI_ENDPOINT field.
 
 save the .env file
+
+### Deploying to Azure (AWReason HTTP Engine)
+
+The AWReason HTTP engine API (`wrappers/http-service`) includes fully
+scripted deployment to **Azure Container Apps**. All deployment code lives
+under `wrappers/http-service/deploy/` and uses a combination of Azure CLI
+commands and Terraform.
+
+#### Prerequisites
+
+- **Azure CLI** (`az`) installed and authenticated (`az login`)
+- **Terraform** installed (for the `apply` phase; alternatively use the
+  `yaml` command for a Terraform-free deploy)
+- **`.env`** file at the repo root with `AZURE_SUBSCRIPTION_ID` and the
+  `AZ_*` deployment variables configured (see `.env_sample`)
+
+#### What Gets Deployed
+
+| Resource | Purpose |
+|---|---|
+| Azure Container Registry | Hosts the Docker image |
+| Azure Container Apps Environment | Serverless container host (Consumption tier) |
+| Azure Container App | Runs the AWReason HTTP API |
+| User-Assigned Managed Identity | Passwordless auth to Storage & Azure OpenAI |
+| Azure Blob Storage | Assessment file upload/download |
+| Log Analytics Workspace | Container and application logs |
+| Application Insights | APM, distributed tracing, metrics |
+| VNet + Subnet *(optional)* | Network isolation for storage firewall |
+| Entra ID App Registration | OAuth2 for the Streamlit frontend |
+
+#### Deployment Steps
+
+**1. Configure `.env`**
+
+Copy `.env_sample` to `.env` and set the required `AZ_*` variables.
+Each resource has a `_REUSE` flag — set to `TRUE` to reference an
+existing resource, or `FALSE` to let the scripts create it.
+
+**2. Set up identity and RBAC**
+
+```bash
+cd wrappers/http-service/deploy
+bash setup-identity.sh mi     # Creates Managed Identity + role assignments
+bash setup-identity.sh app    # Creates Entra ID App Registration
+```
+
+This creates the Managed Identity with **Storage Blob Data Contributor**
+and **Cognitive Services OpenAI User** roles, and optionally an Entra ID
+App Registration for frontend OAuth2 auth.
+
+**3. Run the deployment**
+
+```bash
+bash deploy.sh all
+```
+
+This executes three phases in order:
+
+1. **`infra`** — Ensures all Azure resources exist (storage account, ACR,
+   Log Analytics, App Insights, VNet if enabled, Container Apps
+   environment, storage firewall rules).
+2. **`build`** — Builds the Docker image via ACR Tasks (remote build,
+   no local Docker required) and pushes it to ACR.
+3. **`apply`** — Generates `terraform.tfvars` from `.env` values and
+   Azure CLI lookups, then runs `terraform init`, `plan`, and `apply`
+   to deploy the Container App with all environment variables, probes,
+   and secrets configured.
+
+You can also run phases individually: `bash deploy.sh infra`,
+`bash deploy.sh build`, or `bash deploy.sh apply`.
+
+**4. Verify**
+
+```bash
+bash deploy.sh preview    # Dry-run check of current state and readiness
+```
+
+#### VNet Integration (Optional)
+
+By default the deployment runs without a VNet. To enable network
+isolation (required if your storage account firewall blocks public
+access):
+
+1. Set `AZ_VNET_ENABLED=TRUE` in `.env`
+2. Optionally configure `AZ_VNET_ADDRESS_PREFIX` and
+   `AZ_VNET_SUBNET_PREFIX`
+3. Run `bash deploy.sh all`
+
+This creates a VNet with a subnet delegated to Container Apps and a
+`Microsoft.Storage` service endpoint, then configures the storage
+account firewall to allow only VNet traffic.
+
+#### Alternative: YAML-Based Deploy (No Terraform)
+
+```bash
+bash deploy.sh yaml
+```
+
+Deploys the Container App using the ACA YAML manifest
+(`aca-containerapp.yaml`) instead of Terraform. Useful for simpler
+setups or environments where Terraform is not available.
+
+#### Queue Worker Deployment
+
+A separate Service Bus–driven queue worker is also available for
+auto-scaling batch processing. See the **AWReason Engine – Service Bus
+Queue Worker** section below for details. The worker Dockerfile is at
+`docker/worker.Dockerfile`.
 
 ### Authentication Configuration
 

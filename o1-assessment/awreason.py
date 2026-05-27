@@ -394,6 +394,13 @@ def main():
 
     # Add model selection argument
     parser.add_argument('--model', type=str, help='Override model deployment name (default: from AZURE_OPENAI_DEPLOYMENT_O1 env var)')
+    parser.add_argument(
+        '--reasoning-effort',
+        dest='reasoning_effort',
+        choices=['low', 'medium', 'high'],
+        default='high',
+        help='Reasoning effort for supported O3 and GPT-5.x models (default: high)'
+    )
     
     # Accept up to two PDF files (both must be files, not directories)
     parser.add_argument('--pdf_file1', type=str, help='First PDF file to process (all pages will be extracted as images)')
@@ -778,7 +785,7 @@ def main():
         model_type=model_type,
         api_version=api_version,
         json_template=json_template,
-        reasoning_effort="high"
+        reasoning_effort=args.reasoning_effort
     )
     
     # Configure request parameters based on model type

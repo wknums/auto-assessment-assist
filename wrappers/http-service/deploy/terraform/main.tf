@@ -172,6 +172,12 @@ variable "appinsights_connection_string" {
   description = "Application Insights connection string. When set, APPLICATIONINSIGHTS_CONNECTION_STRING env var is added to the container."
 }
 
+variable "vnet_subnet_id" {
+  type        = string
+  default     = ""
+  description = "Subnet resource ID for ACA VNet integration. Empty = no VNet (current behavior)."
+}
+
 # ── Managed Identity ──────────────────────────────────────────────────
 
 resource "azurerm_user_assigned_identity" "awreason" {
@@ -202,6 +208,22 @@ resource "azurerm_role_assignment" "acr_pull" {
   scope                = var.acr_id
   role_definition_name = "AcrPull"
   principal_id         = azurerm_user_assigned_identity.awreason.principal_id
+}
+
+# ── Storage Network Rules (VNet mode only) ────────────────────────────
+
+resource "azurerm_storage_account_network_rules" "vnet_access" {
+  count              = var.vnet_subnet_id != "" ? 1 : 0
+  storage_account_id = var.blob_account_id
+  default_action     = "Deny"
+  bypass             = ["Logging", "Metrics", "AzureServices"]
+
+  virtual_network_subnet_ids = [var.vnet_subnet_id]
+
+  # Preserve existing IP rules (managed outside Terraform via .env / deploy.sh)
+  lifecycle {
+    ignore_changes = [ip_rules]
+  }
 }
 
 # ── Container App ─────────────────────────────────────────────────────

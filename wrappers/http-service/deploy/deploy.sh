@@ -277,6 +277,109 @@ ensure_appinsights() {
   AZ_APPINSIGHTS_RG="$appi_rg"
 }
 
+# ── VNet (optional – controlled by AZ_VNET_ENABLED) ──────────────────
+
+is_vnet_enabled() {
+  [[ "${AZ_VNET_ENABLED:-FALSE}" == "TRUE" ]]
+}
+
+ensure_vnet() {
+  echo ""
+  echo "── Virtual Network ─────────────────────────────────────────"
+
+  if ! is_vnet_enabled; then
+    echo "  AZ_VNET_ENABLED=FALSE → skipping VNet."
+    return
+  fi
+
+  if is_reuse AZ_VNET_REUSE; then
+    echo "  AZ_VNET_REUSE=TRUE → using existing VNet: ${AZ_VNET_NAME}"
+    if [[ -z "${AZ_VNET_NAME:-}" ]]; then
+      echo "ERROR: AZ_VNET_REUSE=TRUE but AZ_VNET_NAME is empty." >&2
+      exit 1
+    fi
+    local vnet_rg="${AZ_VNET_RG:-${AZ_CONTAINER_APP_ENV_RG}}"
+    if ! resource_exists az network vnet show --name "${AZ_VNET_NAME}" --resource-group "$vnet_rg"; then
+      echo "ERROR: VNet '${AZ_VNET_NAME}' not found in RG '${vnet_rg}' but REUSE=TRUE." >&2
+      exit 1
+    fi
+    # Verify subnet exists
+    if ! resource_exists az network vnet subnet show \
+        --vnet-name "${AZ_VNET_NAME}" --name "${AZ_VNET_SUBNET_NAME:-snet-aca}" \
+        --resource-group "$vnet_rg"; then
+      echo "ERROR: Subnet '${AZ_VNET_SUBNET_NAME:-snet-aca}' not found in VNet '${AZ_VNET_NAME}'." >&2
+      exit 1
+    fi
+    AZ_VNET_RG="$vnet_rg"
+    return
+  fi
+
+  # REUSE=FALSE → create if needed
+  local vnet_name="${AZ_VNET_NAME:-}"
+  local vnet_rg="${AZ_VNET_RG:-${AZ_CONTAINER_APP_ENV_RG}}"
+  local subnet_name="${AZ_VNET_SUBNET_NAME:-snet-aca}"
+  local vnet_prefix="${AZ_VNET_ADDRESS_PREFIX:-10.200.0.0/16}"
+  local subnet_prefix="${AZ_VNET_SUBNET_PREFIX:-10.200.0.0/23}"
+
+  if [[ -z "$vnet_name" ]]; then
+    vnet_name="vnet-$(echo "${AZ_CONTAINER_APP_ENV_NAME:-aca}" | head -c 20)"
+    echo "  No AZ_VNET_NAME set – generated: $vnet_name"
+  fi
+
+  ensure_resource_group "$vnet_rg"
+
+  if resource_exists az network vnet show --name "$vnet_name" --resource-group "$vnet_rg"; then
+    echo "  VNet '$vnet_name' already exists – reusing."
+  else
+    echo "  Creating VNet: $vnet_name ($vnet_prefix) in $vnet_rg"
+    az network vnet create \
+      --name "$vnet_name" \
+      --resource-group "$vnet_rg" \
+      --location "${AZ_LOCATION}" \
+      --address-prefixes "$vnet_prefix" \
+      -o none
+    echo "  ✅ VNet created: $vnet_name"
+  fi
+
+  # Ensure subnet with delegation + service endpoint
+  if resource_exists az network vnet subnet show \
+      --vnet-name "$vnet_name" --name "$subnet_name" --resource-group "$vnet_rg"; then
+    echo "  Subnet '$subnet_name' already exists."
+  else
+    echo "  Creating subnet: $subnet_name ($subnet_prefix)"
+    az network vnet subnet create \
+      --vnet-name "$vnet_name" \
+      --name "$subnet_name" \
+      --resource-group "$vnet_rg" \
+      --address-prefixes "$subnet_prefix" \
+      --delegations "Microsoft.App/environments" \
+      --service-endpoints "Microsoft.Storage" \
+      -o none
+    echo "  ✅ Subnet created with ACA delegation + Storage service endpoint."
+  fi
+
+  # Ensure service endpoint is present (idempotent – covers pre-existing subnets)
+  local existing_endpoints
+  existing_endpoints=$(az network vnet subnet show \
+    --vnet-name "$vnet_name" --name "$subnet_name" --resource-group "$vnet_rg" \
+    --query "serviceEndpoints[?service=='Microsoft.Storage'].service" -o tsv 2>/dev/null | tr -d '\r' || true)
+  if [[ -z "$existing_endpoints" ]]; then
+    echo "  Adding Microsoft.Storage service endpoint to subnet …"
+    az network vnet subnet update \
+      --vnet-name "$vnet_name" --name "$subnet_name" --resource-group "$vnet_rg" \
+      --service-endpoints "Microsoft.Storage" \
+      -o none
+    echo "  ✅ Service endpoint added."
+  fi
+
+  update_env_var "AZ_VNET_NAME" "$vnet_name"
+  update_env_var "AZ_VNET_RG" "$vnet_rg"
+  update_env_var "AZ_VNET_SUBNET_NAME" "$subnet_name"
+  AZ_VNET_NAME="$vnet_name"
+  AZ_VNET_RG="$vnet_rg"
+  AZ_VNET_SUBNET_NAME="$subnet_name"
+}
+
 ensure_container_app_env() {
   echo ""
   echo "── Container Apps Environment ──────────────────────────────"
@@ -339,6 +442,24 @@ ensure_container_app_env() {
       create_args+=(--logs-workspace-id "$law_customer_id" --logs-workspace-key "$law_shared_key")
       echo "  Linking to Log Analytics workspace: ${AZ_LOGANALYTICS_NAME}"
     fi
+
+    # VNet integration (optional)
+    if is_vnet_enabled; then
+      local vnet_rg="${AZ_VNET_RG:-${AZ_CONTAINER_APP_ENV_RG}}"
+      local subnet_id
+      subnet_id=$(az network vnet subnet show \
+        --vnet-name "${AZ_VNET_NAME}" \
+        --name "${AZ_VNET_SUBNET_NAME:-snet-aca}" \
+        --resource-group "$vnet_rg" \
+        --query id -o tsv 2>/dev/null | tr -d '\r')
+      if [[ -n "$subnet_id" ]]; then
+        create_args+=(--infrastructure-subnet-resource-id "$subnet_id")
+        echo "  VNet integration: ${AZ_VNET_NAME}/${AZ_VNET_SUBNET_NAME:-snet-aca}"
+      else
+        echo "  ⚠️  VNet enabled but subnet not found – creating without VNet."
+      fi
+    fi
+
     "${create_args[@]}"
     echo "  ✅ Container Apps Environment created: $env_name"
   fi
@@ -352,7 +473,7 @@ ensure_container_app_env() {
 
 ensure_storage_firewall_allows_aca() {
   echo ""
-  echo "── Storage Firewall: allow ACA outbound IP ─────────────────"
+  echo "── Storage Firewall: allow ACA access ──────────────────────"
 
   if [[ -z "${AZ_STORAGE_NAME:-}" ]]; then
     echo "  ⚠️  AZ_STORAGE_NAME not set – skipping firewall rule."
@@ -363,48 +484,106 @@ ensure_storage_firewall_allows_aca() {
     return
   fi
 
-  # Check if the storage account firewall is enabled (defaultAction=Deny)
-  local default_action
-  default_action=$(az storage account show \
-    --name "${AZ_STORAGE_NAME}" \
-    --resource-group "${AZ_STORAGE_RG}" \
-    --query "networkRuleSet.defaultAction" -o tsv 2>/dev/null | tr -d '\r' || true)
+  if is_vnet_enabled; then
+    # ── VNet mode: add subnet rule → restore Deny ───────────────────
+    local vnet_rg="${AZ_VNET_RG:-${AZ_CONTAINER_APP_ENV_RG}}"
+    local subnet_id
+    subnet_id=$(az network vnet subnet show \
+      --vnet-name "${AZ_VNET_NAME}" \
+      --name "${AZ_VNET_SUBNET_NAME:-snet-aca}" \
+      --resource-group "$vnet_rg" \
+      --query id -o tsv 2>/dev/null | tr -d '\r' || true)
 
-  if [[ "${default_action}" != "Deny" ]]; then
-    echo "  Storage firewall defaultAction=${default_action:-Allow} – no IP rule needed."
-    return
-  fi
+    if [[ -z "$subnet_id" ]]; then
+      echo "  ⚠️  VNet enabled but subnet not found – cannot add VNet rule."
+      return
+    fi
 
-  # Get the ACA environment's static outbound IP
-  local aca_static_ip
-  aca_static_ip=$(az containerapp env show \
-    --name "${AZ_CONTAINER_APP_ENV_NAME}" \
-    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
-    --query "properties.staticIp" -o tsv 2>/dev/null | tr -d '\r' || true)
-  aca_static_ip="${aca_static_ip:-}"
-
-  if [[ -z "$aca_static_ip" ]]; then
-    echo "  ⚠️  Could not resolve ACA environment static IP – skipping."
-    return
-  fi
-
-  # Check if the IP is already in the allow list
-  local existing
-  existing=$(az storage account network-rule list \
-    --account-name "${AZ_STORAGE_NAME}" \
-    --resource-group "${AZ_STORAGE_RG}" \
-    --query "ipRules[?ipAddressOrRange=='${aca_static_ip}'].ipAddressOrRange" \
-    -o tsv 2>/dev/null | tr -d '\r' || true)
-
-  if [[ -n "$existing" ]]; then
-    echo "  ACA outbound IP ${aca_static_ip} already allowed."
-  else
-    az storage account network-rule add \
+    # Check if VNet rule already exists
+    local existing_vnet_rule
+    existing_vnet_rule=$(az storage account network-rule list \
       --account-name "${AZ_STORAGE_NAME}" \
       --resource-group "${AZ_STORAGE_RG}" \
-      --ip-address "${aca_static_ip}" \
-      -o none
-    echo "  ✅ Added ACA outbound IP ${aca_static_ip} to storage firewall."
+      --query "virtualNetworkRules[?virtualNetworkResourceId=='${subnet_id}'].virtualNetworkResourceId" \
+      -o tsv 2>/dev/null | tr -d '\r' || true)
+
+    if [[ -n "$existing_vnet_rule" ]]; then
+      echo "  VNet rule for ${AZ_VNET_SUBNET_NAME:-snet-aca} already exists."
+    else
+      echo "  Adding VNet rule for subnet ${AZ_VNET_SUBNET_NAME:-snet-aca} …"
+      az storage account network-rule add \
+        --account-name "${AZ_STORAGE_NAME}" \
+        --resource-group "${AZ_STORAGE_RG}" \
+        --subnet "$subnet_id" \
+        -o none
+      echo "  ✅ VNet rule added."
+    fi
+
+    # Ensure defaultAction is Deny (firewall active)
+    local default_action
+    default_action=$(az storage account show \
+      --name "${AZ_STORAGE_NAME}" \
+      --resource-group "${AZ_STORAGE_RG}" \
+      --query "networkRuleSet.defaultAction" -o tsv 2>/dev/null | tr -d '\r' || true)
+
+    if [[ "${default_action}" != "Deny" ]]; then
+      echo "  Setting storage firewall defaultAction=Deny …"
+      az storage account update \
+        --name "${AZ_STORAGE_NAME}" \
+        --resource-group "${AZ_STORAGE_RG}" \
+        --default-action Deny \
+        -o none
+      echo "  ✅ Storage firewall enabled (defaultAction=Deny)."
+    else
+      echo "  Storage firewall already set to Deny."
+    fi
+  else
+    # ── No VNet: best-effort IP rule (may not work for Consumption tier) ─
+    local default_action
+    default_action=$(az storage account show \
+      --name "${AZ_STORAGE_NAME}" \
+      --resource-group "${AZ_STORAGE_RG}" \
+      --query "networkRuleSet.defaultAction" -o tsv 2>/dev/null | tr -d '\r' || true)
+
+    if [[ "${default_action}" != "Deny" ]]; then
+      echo "  Storage firewall defaultAction=${default_action:-Allow} – no IP rule needed."
+      return
+    fi
+
+    echo "  ⚠️  No VNet – Consumption-tier ACA uses shared outbound IPs."
+    echo "     Storage firewall may block ACA blob access."
+    echo "     Consider AZ_VNET_ENABLED=TRUE for reliable firewall + ACA."
+
+    # Try static IP as best-effort
+    local aca_static_ip
+    aca_static_ip=$(az containerapp env show \
+      --name "${AZ_CONTAINER_APP_ENV_NAME}" \
+      --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+      --query "properties.staticIp" -o tsv 2>/dev/null | tr -d '\r' || true)
+    aca_static_ip="${aca_static_ip:-}"
+
+    if [[ -z "$aca_static_ip" ]]; then
+      echo "  ⚠️  Could not resolve ACA environment static IP – skipping."
+      return
+    fi
+
+    local existing
+    existing=$(az storage account network-rule list \
+      --account-name "${AZ_STORAGE_NAME}" \
+      --resource-group "${AZ_STORAGE_RG}" \
+      --query "ipRules[?ipAddressOrRange=='${aca_static_ip}'].ipAddressOrRange" \
+      -o tsv 2>/dev/null | tr -d '\r' || true)
+
+    if [[ -n "$existing" ]]; then
+      echo "  ACA static IP ${aca_static_ip} already in allow list (best-effort)."
+    else
+      az storage account network-rule add \
+        --account-name "${AZ_STORAGE_NAME}" \
+        --resource-group "${AZ_STORAGE_RG}" \
+        --ip-address "${aca_static_ip}" \
+        -o none
+      echo "  ✅ Added ACA static IP ${aca_static_ip} (best-effort – may not work for Consumption tier)."
+    fi
   fi
 }
 
@@ -470,6 +649,7 @@ do_infra() {
   ensure_acr
   ensure_log_analytics
   ensure_appinsights
+  ensure_vnet
   ensure_container_app_env
   ensure_storage_firewall_allows_aca
 
@@ -614,6 +794,54 @@ _tf_import_if_needed() {
   # ── Container App ───────────────────────────────────────────────
   local ca_id="/subscriptions/${sub_id}/resourceGroups/${mi_rg}/providers/Microsoft.App/containerApps/${AZ_CONTAINER_APP_NAME}"
   _tf_try_import "azurerm_container_app.awreason" "$ca_id"
+
+  # ── Storage Network Rules (VNet mode only) ─────────────────────
+  if is_vnet_enabled; then
+    local stor_id="/subscriptions/${sub_id}/resourceGroups/${AZ_STORAGE_RG}/providers/Microsoft.Storage/storageAccounts/${AZ_STORAGE_NAME}"
+    _tf_try_import 'azurerm_storage_account_network_rules.vnet_access[0]' "$stor_id"
+  fi
+}
+
+# ── Update Entra ID App Registration redirect URIs ────────────────
+# Called after Terraform apply when the ACA FQDN is known. Ensures
+# the app registration always has the current FQDN as a redirect URI
+# (alongside the localhost dev URI).
+update_redirect_uris() {
+  local fqdn="${1:-}"
+  if [[ -z "$fqdn" ]]; then
+    echo "  ⏩ No FQDN supplied — skipping redirect URI update."
+    return
+  fi
+  if [[ -z "${AAD_CLIENT_ID:-}" ]]; then
+    echo "  ⏩ AAD_CLIENT_ID not set — skipping redirect URI update."
+    return
+  fi
+
+  echo ""
+  echo "── Updating Entra ID App Registration redirect URIs ────────"
+
+  local aca_uri="https://${fqdn}/"
+  local localhost_uri="http://localhost:8501/"
+
+  # Fetch current redirect URIs
+  local current_uris
+  current_uris=$(az ad app show --id "$AAD_CLIENT_ID" \
+    --query "web.redirectUris" -o tsv 2>/dev/null | tr -d '\r' || true)
+
+  # Check if the ACA URI is already present
+  if echo "$current_uris" | grep -qF "$aca_uri"; then
+    echo "  ✅ Redirect URI already up to date: $aca_uri"
+    return
+  fi
+
+  # Set redirect URIs: always include localhost + current ACA FQDN
+  az ad app update \
+    --id "$AAD_CLIENT_ID" \
+    --web-redirect-uris "$localhost_uri" "$aca_uri" \
+    -o none 2>/dev/null
+  echo "  ✅ Redirect URIs updated:"
+  echo "     - $localhost_uri"
+  echo "     - $aca_uri"
 }
 
 do_apply() {
@@ -651,6 +879,7 @@ _do_apply_impl() {
   else
     terraform plan -var-file=terraform.tfvars
     read -rp "Apply this plan? [y/N] " confirm
+    confirm="${confirm//$'\r'/}"
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
       proceed="y"
     fi
@@ -675,7 +904,9 @@ _do_apply_impl() {
       while (( attempt < max_attempts )); do
         attempt=$((attempt + 1))
         local status
-        status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null || echo "000")
+        if ! status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null); then
+          status="000"
+        fi
         if [[ "$status" == "200" ]]; then
           echo "  ✅ Health check passed (HTTP $status) – $url"
           break
@@ -688,6 +919,9 @@ _do_apply_impl() {
         echo "     Check logs: az containerapp logs show --name ${AZ_CONTAINER_APP_NAME} --resource-group ${AZ_CONTAINER_APP_ENV_RG} --type console --tail 30 --follow false"
       fi
     fi
+
+    # ── Update Entra ID redirect URIs with the (possibly new) FQDN ──
+    update_redirect_uris "$fqdn"
   else
     echo "Aborted."
   fi
@@ -764,6 +998,14 @@ do_yaml() {
   echo ""
   echo "✅ Deployed via YAML!"
   echo "   (nginx proxy_read_timeout is 600s for long-running assessments)"
+
+  # ── Update Entra ID redirect URIs with the (possibly new) FQDN ──
+  local yaml_fqdn
+  yaml_fqdn=$(az containerapp show \
+    --name "${AZ_CONTAINER_APP_NAME}" \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --query "properties.configuration.ingress.fqdn" -o tsv 2>/dev/null | tr -d '\r' || true)
+  update_redirect_uris "${yaml_fqdn:-}"
 }
 
 # ── Preview ───────────────────────────────────────────────────────────

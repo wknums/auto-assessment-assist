@@ -50,6 +50,10 @@ from app.utils import elapsed_ms, is_allowed_file, now_ms
 
 logger = get_logger(__name__)
 
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+_MARKDOWN_SUFFIXES = {".md", ".txt", ".docx"}
+_PDF_SUFFIXES = {".pdf"}
+
 # ══════════════════════════════════════════════════════════════════════
 #  Routers
 # ══════════════════════════════════════════════════════════════════════
@@ -437,6 +441,8 @@ async def assess_passthrough(
                                                description="Optional JSON output template."),
     join_mode: Optional[str] = Form(default=None, alias="joinMode",
                                     description="'horizontal' or 'vertical' image joining."),
+    reasoning_effort: str = Form(default="high", alias="reasoningEffort",
+                                 description="Reasoning effort for supported O3 and GPT-5.x models."),
     batch_id: Optional[str] = Form(default=None, alias="batchId",
                                    description="Batch identifier – groups runs for the same input."),
     run_number: Optional[int] = Form(default=None, alias="runNumber",
@@ -477,16 +483,37 @@ async def assess_passthrough(
 
                 # Save uploaded files
                 local_prompt = await _save_upload(prompt_file, downloads_dir)
+                prompt_for_run = local_prompt
 
                 pdf_files: List[Path] = []
                 image_files: List[Path] = []
+                markdown_cv_files: List[Path] = []
                 for uf in cv_files:
                     if uf.filename:
+                        if not is_allowed_file(uf.filename):
+                            return _problem(
+                                400,
+                                "Invalid cvFiles input",
+                                f"Unsupported file type for cvFiles[]: {uf.filename}",
+                                cid,
+                                request.url.path,
+                            )
                         saved = await _save_upload(uf, downloads_dir)
-                        if saved.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                        suffix = saved.suffix.lower()
+                        if suffix in _IMAGE_SUFFIXES:
                             image_files.append(saved)
-                        else:
+                        elif suffix in _PDF_SUFFIXES:
                             pdf_files.append(saved)
+                        elif suffix in _MARKDOWN_SUFFIXES:
+                            markdown_cv_files.append(saved)
+                        else:
+                            return _problem(
+                                400,
+                                "Invalid cvFiles input",
+                                f"Unsupported file type for cvFiles[]: {uf.filename}",
+                                cid,
+                                request.url.path,
+                            )
 
                 local_spec: Optional[Path] = None
                 if spec_file:
@@ -501,12 +528,27 @@ async def assess_passthrough(
                 pdf2 = pdf_files[1] if len(pdf_files) >= 2 else None
 
                 md_file: Optional[Path] = None
-                if local_spec and local_spec.suffix.lower() in (".md", ".txt", ".docx"):
-                    md_file = local_spec
+                markdown_sources: List[Path] = []
+                if local_spec and local_spec.suffix.lower() in _MARKDOWN_SUFFIXES:
+                    markdown_sources.append(local_spec)
                 elif local_spec:
                     # Spec is a PDF — use as pdf2 if slot is free
                     if pdf2 is None:
                         pdf2 = local_spec
+
+                markdown_sources.extend(markdown_cv_files)
+
+                if markdown_cv_files:
+                    prompt_for_run = _merge_prompt_and_context(
+                        prompt_file=local_prompt,
+                        sources=markdown_sources,
+                        output_path=downloads_dir / "merged-prompt.md",
+                    )
+                elif markdown_sources:
+                    md_file = _merge_markdown_sources(
+                        sources=markdown_sources,
+                        output_path=downloads_dir / "merged-context.md",
+                    )
 
                 # If images were uploaded, put them in a folder
                 images_folder: Optional[Path] = None
@@ -523,15 +565,21 @@ async def assess_passthrough(
                                     f"joinMode must be 'horizontal' or 'vertical', got '{join_mode}'",
                                     cid, request.url.path)
 
+                if reasoning_effort not in ("low", "medium", "high"):
+                    return _problem(400, "Invalid reasoningEffort",
+                                    f"reasoningEffort must be 'low', 'medium', or 'high', got '{reasoning_effort}'",
+                                    cid, request.url.path)
+
                 # Run awreason as passthrough
                 result = await run_passthrough(
                     run_dir=run_dir,
-                    prompt_file=local_prompt,
+                    prompt_file=prompt_for_run,
                     pdf_file1=pdf1,
                     pdf_file2=pdf2,
                     md_file=md_file,
                     json_template=local_json_template,
                     join_mode=join_mode,
+                    reasoning_effort=reasoning_effort,
                     images_folder1=images_folder,
                 )
 
@@ -712,6 +760,68 @@ async def aggregate_runs(
 def _blob_filename(uri: str) -> str:
     """Extract the last path segment from a blob URI as a filename."""
     return uri.rstrip("/").rsplit("/", 1)[-1] or "download"
+
+
+def _read_markdown_source(source: Path) -> str:
+    """Return markdown-compatible text from a supported source file."""
+    suffix = source.suffix.lower()
+    if suffix in {".md", ".txt"}:
+        return source.read_text(encoding="utf-8", errors="replace").strip()
+    if suffix == ".docx":
+        from docx import Document  # type: ignore
+        from markdownify import markdownify as markdownify_text  # type: ignore
+
+        doc = Document(source)
+        doc_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+        return markdownify_text(doc_text).strip()
+    raise ValueError(f"Unsupported markdown source: {source.name}")
+
+
+def _merge_markdown_sources(*, sources: List[Path], output_path: Path) -> Path:
+    """Merge markdown-like inputs into one temp markdown file."""
+    sections: List[str] = []
+
+    for index, source in enumerate(sources, start=1):
+        content = _read_markdown_source(source)
+        if not content:
+            continue
+        sections.append(
+            f"\n\n---\n\n# Context {index}: {source.name}\n\n{content}\n"
+        )
+
+    output_path.write_text("".join(sections), encoding="utf-8")
+    logger.info(
+        "Created merged markdown context %s from %d sources",
+        output_path,
+        len(sources),
+    )
+    return output_path
+
+
+def _merge_prompt_and_context(*, prompt_file: Path, sources: List[Path], output_path: Path) -> Path:
+    """Create a merged prompt markdown in prompt, spec, then CV order."""
+    prompt_text = prompt_file.read_text(encoding="utf-8", errors="replace").strip()
+    sections: List[str] = [f"# Prompt File: {prompt_file.name}\n\n{prompt_text}\n"]
+
+    if sources:
+        sections.append("\n\n---\n\n# Additional Context\n")
+
+    for index, source in enumerate(sources, start=1):
+        content = _read_markdown_source(source)
+        if not content:
+            continue
+        sections.append(
+            f"\n\n---\n\n# Context {index}: {source.name}\n\n{content}\n"
+        )
+
+    output_path.write_text("".join(sections), encoding="utf-8")
+    logger.info(
+        "Created merged prompt markdown %s from prompt %s and %d sources",
+        output_path,
+        prompt_file.name,
+        len(sources),
+    )
+    return output_path
 
 
 async def _save_upload(upload: UploadFile, dest_dir: Path) -> Path:

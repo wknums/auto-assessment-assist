@@ -105,4 +105,63 @@
 /wrappers/http-service/deploy/terraform/*.tfstate*
 /wrappers/http-service/deploy/_resolved-aca.yaml
 
+# Unignore queue-worker wrapper and shared runtime dependencies
+!/contracts/
+!/contracts/__init__.py
+!/contracts/models.py
+!/contracts/version.py
+
+!/engine_core/
+!/engine_core/__init__.py
+!/engine_core/aoai_client.py
+!/engine_core/blob_io.py
+!/engine_core/runner.py
+
+!/runtime/
+!/runtime/__init__.py
+!/runtime/config.py
+!/runtime/telemetry.py
+!/runtime/workdir.py
+
+!/docker/
+!/docker/worker.Dockerfile
+!/docker/worker-requirements.txt
+
+!/wrappers/queue-worker/
+!/wrappers/queue-worker/__init__.py
+!/wrappers/queue-worker/main.py
+!/wrappers/queue-worker/servicebus_io.py
+!/wrappers/queue-worker/platform_client.py
+!/wrappers/queue-worker/idempotency.py
+!/wrappers/queue-worker/deploy/
+!/wrappers/queue-worker/deploy/README.md
+!/wrappers/queue-worker/deploy/deploy.sh
+!/wrappers/queue-worker/deploy/aca-containerapp.yaml
+
+# Re-ignore queue-worker generated/runtime artifacts
+/wrappers/queue-worker/__pycache__/
+/wrappers/queue-worker/deploy/.last_image_tag
+/wrappers/queue-worker/deploy/_resolved-aca.yaml
+
+# Root/local secret env files must never be published
+/.env
+/.env.*
+/.env_qa
+
+# Common secret/certificate/key artifacts
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+*.keystore
+*.kdbx
+*.asc
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+**/secrets.*
+**/*credentials*.json
+
 ~$*

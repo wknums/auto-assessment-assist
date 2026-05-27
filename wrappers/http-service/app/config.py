@@ -65,7 +65,7 @@ class Settings(BaseSettings):
 
     # ── Awreason runner ───────────────────────────────────────────────
     awreason_cli_cmd: str = Field("awreason.py", alias="AWREASON_CLI_CMD")
-    awreason_cli_timeout: int = Field(300, alias="AWREASON_CLI_TIMEOUT")
+    awreason_cli_timeout: int = Field(500, alias="AWREASON_CLI_TIMEOUT")
     awreason_max_retries: int = Field(3, alias="AWREASON_MAX_RETRIES")
     awreason_retry_backoff: int = Field(10, alias="AWREASON_RETRY_BACKOFF")
 

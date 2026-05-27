@@ -216,7 +216,8 @@ def display_file_content(file_path):
         st.warning(f"Preview not available for {file_extension} files. Please download to view.")
 
 def run_assessment(prompt_file_path, pdf_files, join_option, json_template_path, output_dir,
-                  status_placeholder, console_placeholder, console_output, md_file_path=None, image_folder=None):
+                  status_placeholder, console_placeholder, console_output, md_file_path=None,
+                  image_folder=None, reasoning_effort="high"):
     """Run the assessment using awreason.py script.
 
     Added support for optional markdown context file (passed via --md_file to awreason.py).
@@ -264,6 +265,10 @@ def run_assessment(prompt_file_path, pdf_files, join_option, json_template_path,
         # Add join option if selected
         if join_option:
             cmd.extend(["--join", join_option])
+
+        # Add reasoning effort for supported reasoning models
+        if reasoning_effort:
+            cmd.extend(["--reasoning-effort", reasoning_effort])
         
         # Add JSON template if provided
         if json_template_path:
@@ -971,6 +976,14 @@ def main():
             type=["json"],
             help="Optional JSON template to structure the assessment output."
         )
+
+        st.subheader("Model Options")
+        reasoning_effort = st.selectbox(
+            "Reasoning effort",
+            options=["low", "medium", "high"],
+            index=2,
+            help="Controls reasoning effort for supported O3 and GPT-5.x models."
+        )
     
     with tab3:
         st.markdown("<h2 class='section-header'>Batch Document Processing</h2>", unsafe_allow_html=True)
@@ -1547,6 +1560,8 @@ def main():
                                 api_result_path = run_assessment_via_api(
                                     prompt_file_path=str(batch_prompt_path),
                                     pdf_files=_api_pdfs,
+                                    join_option=join_option,
+                                    reasoning_effort=reasoning_effort,
                                     json_template_path=str(batch_json_path) if batch_json_path else None,
                                     md_file_path=_api_md,
                                     output_dir=str(batch_output_dir),
@@ -1642,6 +1657,14 @@ def main():
                             # Add JSON template if provided
                             if batch_json_path:
                                 cmd_analyze.extend(["--jsonout_template", str(batch_json_path)])
+
+                            # Add image joining mode if configured
+                            if join_option:
+                                cmd_analyze.extend(["--join", join_option])
+
+                            # Add reasoning effort for supported reasoning models
+                            if reasoning_effort:
+                                cmd_analyze.extend(["--reasoning-effort", reasoning_effort])
                             
                             # Add output file
                             cmd_analyze.extend(["--output", str(output_file_path)])
@@ -2628,6 +2651,7 @@ def main():
                     prompt_file_path=str(prompt_path),
                     pdf_files=pdf_paths,
                     join_option=join_option,
+                    reasoning_effort=reasoning_effort,
                     json_template_path=str(json_template_path) if json_template_path else None,
                     md_file_path=str(md_path) if md_path else None,
                     image_folder=str(images_dir) if image_paths else None,
@@ -2649,7 +2673,8 @@ def main():
                     console_placeholder,
                     console_output,
                     md_file_path=str(md_path) if md_path else None,
-                    image_folder=str(images_dir) if image_paths else None
+                    image_folder=str(images_dir) if image_paths else None,
+                    reasoning_effort=reasoning_effort,
                 )
             
             # Display results
