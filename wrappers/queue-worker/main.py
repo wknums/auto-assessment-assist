@@ -16,6 +16,7 @@ Environment variables are documented in ``runtime/config.py``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -24,6 +25,7 @@ from typing import Any
 
 from contracts.models import FinishRunRequest, RunMessage, RunResultMessage
 from contracts.version import log_version_and_validate
+from pydantic import ValidationError
 from runtime.config import engine_settings
 from runtime.telemetry import (
     correlation_id_var,
@@ -72,7 +74,26 @@ async def _process_message(raw_body: str, traceparent: str = "") -> None:
     load_run_marker = _idempotency.load_run_marker
 
     # 1) Deserialise
-    run_msg = RunMessage.model_validate_json(raw_body)
+    try:
+        run_msg = RunMessage.model_validate_json(raw_body)
+    except ValidationError as exc:
+        body_preview = raw_body[:600]
+        body_keys = []
+        try:
+            parsed = json.loads(raw_body)
+            if isinstance(parsed, dict):
+                body_keys = sorted(parsed.keys())
+        except Exception:
+            body_keys = []
+
+        logger.error(
+            "RunMessage validation failed; dead-lettering. keys=%s errors=%s body_prefix=%s",
+            body_keys,
+            exc.errors()[:5],
+            body_preview,
+        )
+        raise
+
     correlation_id_var.set(run_msg.correlation_id)
     run_id_var.set(run_msg.run_id)
     logger.info(

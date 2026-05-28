@@ -99,6 +99,8 @@ properties:
           - name: PLATFORM_CONTRACT_URL
             value: "{{ PLATFORM_CONTRACT_URL }}"
 
+{{ EXTRA_ENV_BLOCK }}
+
         volumeMounts:
           - volumeName: workdir-emptydir
             mountPath: /work

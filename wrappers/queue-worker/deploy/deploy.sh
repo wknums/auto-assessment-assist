@@ -104,6 +104,23 @@ escape_sed_replacement() {
   printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'
 }
 
+escape_yaml_double_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+array_contains() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
 require_command az
 require_command git
 
@@ -767,6 +784,16 @@ validate_worker_settings() {
       exit 1
     fi
   fi
+
+  if [[ -z "${AZURE_OPENAI_ENDPOINT:-}" ]]; then
+    echo "ERROR: AZURE_OPENAI_ENDPOINT must be set in $ENV_FILE for queue-worker awreason execution." >&2
+    exit 1
+  fi
+
+  if [[ -z "${AZURE_OPENAI_DEPLOYMENT_O1:-}" ]]; then
+    echo "ERROR: AZURE_OPENAI_DEPLOYMENT_O1 must be set in $ENV_FILE for queue-worker awreason execution." >&2
+    exit 1
+  fi
 }
 
 print_preview() {
@@ -801,6 +828,33 @@ print_preview() {
 render_yaml() {
   local -a sed_args=()
   local escaped=""
+  local extra_env_file
+  local env_key
+  local env_value
+  local -a explicit_env_names=(
+    "LOG_LEVEL"
+    "WORKDIR_BASE"
+    "PER_REPLICA_CONCURRENCY"
+    "SB_NAMESPACE"
+    "SB_QUEUE"
+    "SB_RESULTS_QUEUE"
+    "REPORT_MODE"
+    "PLATFORM_API_BASE_URL"
+    "PLATFORM_AUDIENCE"
+    "BLOB_ACCOUNT_URL"
+    "BLOB_RESULTS_CONTAINER"
+    "BLOB_RESULTS_PREFIX"
+    "APIM_AOAI_BASE_URL"
+    "AOAI_DEPLOYMENT"
+    "AOAI_API_VERSION"
+    "AZURE_TENANT_ID"
+    "AZURE_CLIENT_ID"
+    "AWREASON_CLI_TIMEOUT"
+    "AWREASON_MAX_RETRIES"
+    "AWREASON_RETRY_BACKOFF"
+    "OTEL_EXPORTER_OTLP_ENDPOINT"
+    "PLATFORM_CONTRACT_URL"
+  )
 
   append_replacement() {
     local placeholder="$1"
@@ -843,7 +897,25 @@ render_yaml() {
   append_replacement "QUEUE_WORKER_COOLDOWN_PERIOD" "${QUEUE_WORKER_COOLDOWN_PERIOD}"
   append_replacement "QUEUE_WORKER_MESSAGE_COUNT" "${QUEUE_WORKER_MESSAGE_COUNT}"
 
-  sed "${sed_args[@]}" "${SCRIPT_DIR}/aca-containerapp.yaml" > "$RESOLVED_YAML"
+  extra_env_file=$(mktemp)
+  while IFS= read -r env_key; do
+    env_key="${env_key%%$'\r'}"
+    [[ -z "$env_key" ]] && continue
+    if array_contains "$env_key" "${explicit_env_names[@]}"; then
+      continue
+    fi
+
+    env_value="${!env_key:-}"
+    env_value="$(escape_yaml_double_quote "$env_value")"
+
+    printf '          - name: %s\n' "$env_key" >> "$extra_env_file"
+    printf '            value: "%s"\n' "$env_value" >> "$extra_env_file"
+  done < <(sed 's/\r$//' "$ENV_FILE" | grep -v '^\s*#' | grep '=' | cut -d '=' -f 1)
+
+  sed "${sed_args[@]}" "${SCRIPT_DIR}/aca-containerapp.yaml" \
+    | sed "/{{ EXTRA_ENV_BLOCK }}/r $extra_env_file" \
+    | sed "/{{ EXTRA_ENV_BLOCK }}/d" > "$RESOLVED_YAML"
+  rm -f "$extra_env_file"
   echo "Generated: $RESOLVED_YAML"
 }
 

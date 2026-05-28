@@ -70,10 +70,123 @@ The Service Bus namespace name in the scale rule must be the bare namespace name
 - `SB_NAMESPACE=mybus.servicebus.windows.net`
 - `SB_NAMESPACE_NAME=mybus`
 
-## Deployment Flow
+## Detailed Build And Deploy Commands
 
-1. Build and push the image from [docker/worker.Dockerfile](../../../docker/worker.Dockerfile).
-2. Ensure the managed identity exists and has the RBAC listed above.
-3. Replace the placeholders in [wrappers/queue-worker/deploy/aca-containerapp.yaml](./aca-containerapp.yaml).
-4. Deploy with `az containerapp create --yaml ...` or `az containerapp update --yaml ...`.
-5. Send a test message to `SB_QUEUE` and confirm the app processes it and scales as expected.
+The queue worker is deployed with [wrappers/queue-worker/deploy/deploy.sh](./deploy.sh). The script sources values from repo root `.env_qa` by default and supports these actions:
+
+- `preview`: resolve and print effective deployment values
+- `infra`: ensure dependent Azure resources exist (with reuse safety checks)
+- `build`: build and push image to ACR
+- `yaml`: render and apply ACA YAML (`create` or `update` automatically)
+- `all`: run `infra`, then `build`, then `yaml`
+
+### 1) Prerequisites
+
+Run from repo root:
+
+```bash
+az login
+az account set --subscription <subscription-id>
+```
+
+Ensure `.env_qa` has the required values used by the script and YAML, including:
+
+- `AZURE_SUBSCRIPTION_ID`
+- `AZ_ACR_NAME`, `AZ_ACR_RG`
+- `AZ_CONTAINER_APP_ENV_NAME`, `AZ_CONTAINER_APP_ENV_RG`
+- `AZ_CONTAINER_APP_NAME_Q_WORKER`
+- `AZ_MI_NAME` / resolved MI IDs
+- `SB_NAMESPACE`, `SB_RUNS_QUEUE`, `SB_RESULTS_QUEUE`
+- `AZ_STORAGE_NAME`, `AZ_STORAGE_RG`
+
+### 2) Preview Effective Settings
+
+```bash
+cd wrappers/queue-worker/deploy
+bash deploy.sh preview
+```
+
+Use this output to confirm image target, ACA environment, Service Bus namespace/queue, and scale settings before deployment.
+
+### 3) Build Latest Image
+
+```bash
+cd wrappers/queue-worker/deploy
+bash deploy.sh build
+```
+
+Notes:
+
+- Default build context mode is `staged` (`BUILD_CONTEXT_MODE=staged`) for faster ACR builds.
+- The script writes the pushed tag to `.last_image_tag`.
+- It pushes both `<tag>` and `latest` for `awreason-queue-worker`.
+
+### 4) Apply Deployment (YAML)
+
+```bash
+cd wrappers/queue-worker/deploy
+bash deploy.sh yaml
+```
+
+This action:
+
+1. Generates [wrappers/queue-worker/deploy/_resolved-aca.yaml](./_resolved-aca.yaml)
+2. Applies via `az containerapp update --yaml ...` if app exists
+3. Falls back to `az containerapp create --yaml ...` if app is missing
+
+### 5) Optional: End-To-End In One Command
+
+```bash
+cd wrappers/queue-worker/deploy
+bash deploy.sh all
+```
+
+Use this when you also want infra checks/provisioning in the same run.
+
+## Validation Commands
+
+### Check active revision and image
+
+```bash
+az containerapp show \
+	--resource-group <rg> \
+	--name <queue-worker-app-name> \
+	--query "{latestRevisionName:properties.latestRevisionName,latestReadyRevisionName:properties.latestReadyRevisionName,image:properties.template.containers[0].image,runningStatus:properties.runningStatus}" \
+	-o json
+```
+
+### Check queue depth
+
+```bash
+az servicebus queue show \
+	--resource-group <rg> \
+	--namespace-name <servicebus-namespace-name> \
+	--name <runs-queue-name> \
+	--query "{active:countDetails.activeMessageCount,deadLetter:countDetails.deadLetterMessageCount,scheduled:countDetails.scheduledMessageCount}" \
+	-o json
+```
+
+### Tail worker logs
+
+```bash
+az containerapp logs show \
+	--resource-group <rg> \
+	--name <queue-worker-app-name> \
+	--tail 200
+```
+
+## Safe Reuse Behavior
+
+The script is designed to avoid destructive changes on reused resources:
+
+- `*_REUSE=TRUE` resources are never deleted
+- Reused-resource mutations are blocked unless `ALLOW_REUSE_RESOURCE_MUTATIONS=TRUE`
+
+This lets you safely run build/deploy in shared QA environments without accidental teardown.
+
+## Troubleshooting
+
+- If build stalls on source packaging, keep `BUILD_CONTEXT_MODE=staged`.
+- If `yaml` fails on Windows path handling, run from Git Bash as shown above.
+- If image tag resolves empty, remove stale `.last_image_tag` and rerun `build`.
+- If processing fails with blob authorization errors, verify MI blob roles on the exact storage account(s) hosting `cv-uploads` and `batch-results`.

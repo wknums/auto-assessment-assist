@@ -22,6 +22,7 @@ import json
 import logging
 import mimetypes
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -39,6 +40,7 @@ from runtime.config import engine_settings
 from runtime.workdir import new_run_workdir
 
 logger = logging.getLogger(__name__)
+MAX_ERROR_SNIPPET_CHARS = 2000
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -86,6 +88,26 @@ def _extract_tokens(stdout: str) -> Tuple[int, int]:
         int(inp_m.group(1).replace(",", "")) if inp_m else 0,
         int(out_m.group(1).replace(",", "")) if out_m else 0,
     )
+
+
+def _first_non_empty(*parts: Optional[str]) -> str:
+    for part in parts:
+        if part and part.strip():
+            return part.strip()
+    return ""
+
+
+def _snippet(text: str, max_chars: int = MAX_ERROR_SNIPPET_CHARS) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def _format_awreason_failure(returncode: int, stderr_text: str, stdout_text: str) -> str:
+    detail = _first_non_empty(stderr_text, stdout_text)
+    if not detail:
+        detail = "<no stderr/stdout captured>"
+    return f"awreason exited {returncode}: {_snippet(detail)}"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -147,6 +169,21 @@ def execute_run(
                     downloads_dir / _blob_filename(params.prompt_blob_uri),
                 )
 
+            inline_prompt: Optional[str] = None
+            if hasattr(params, "model_extra") and params.model_extra:
+                extra = params.model_extra
+                inline_prompt = extra.get("prompt") or extra.get("prompt_text")
+
+            if prompt_file is not None:
+                if not prompt_file.exists():
+                    raise RuntimeError(f"Prompt file not found after download: {prompt_file}")
+                if prompt_file.stat().st_size == 0:
+                    raise RuntimeError(f"Prompt file is empty: {prompt_file}")
+            elif not inline_prompt:
+                raise RuntimeError(
+                    "No prompt source available: parameters.prompt_blob_uri missing and no inline prompt provided."
+                )
+
             spec_file: Optional[Path] = None
             if params.spec_blob_uri:
                 spec_file = download_blob_to_path(
@@ -180,6 +217,8 @@ def execute_run(
             cli_args = [sys.executable, _find_awreason_script()]
             if prompt_file:
                 cli_args += ["--promptfile", str(prompt_file)]
+            elif inline_prompt:
+                cli_args += ["--prompt", inline_prompt]
             cli_args += ["--output", str(out_file), "--tempdir", str(tempdir)]
             if pdf1:
                 cli_args += ["--pdf_file1", str(pdf1)]
@@ -197,6 +236,14 @@ def execute_run(
             backoff = engine_settings.awreason_retry_backoff
             timeout = engine_settings.awreason_cli_timeout
             stdout_text = ""
+            stderr_text = ""
+            last_error_detail = ""
+
+            logger.info(
+                "awreason command run_id=%s cmd=%s",
+                run_id,
+                " ".join(shlex.quote(arg) for arg in cli_args),
+            )
 
             for attempt in range(1, max_retries + 1):
                 logger.info(
@@ -206,22 +253,32 @@ def execute_run(
                     result = subprocess.run(
                         cli_args,
                         capture_output=True,
+                        text=True,
                         timeout=timeout,
                     )
-                    stdout_text = result.stdout.decode("utf-8", errors="replace")
-                    stderr_text = result.stderr.decode("utf-8", errors="replace")
+                    stdout_text = result.stdout or ""
+                    stderr_text = result.stderr or ""
 
                     if result.returncode == 0:
                         break
+                    last_error_detail = _format_awreason_failure(
+                        result.returncode,
+                        stderr_text,
+                        stdout_text,
+                    )
                     logger.error(
-                        "awreason exited %d on attempt %d: %s",
+                        "awreason exited %d on attempt %d (stderr_len=%d stdout_len=%d): %s",
                         result.returncode,
                         attempt,
-                        stderr_text[:2000],
+                        len(stderr_text),
+                        len(stdout_text),
+                        _snippet(_first_non_empty(stderr_text, stdout_text, "<no stderr/stdout captured>")),
                     )
                 except subprocess.TimeoutExpired:
                     logger.error("awreason timed out after %ds (attempt %d)", timeout, attempt)
                     stderr_text = f"Process timed out after {timeout}s"
+                    stdout_text = ""
+                    last_error_detail = stderr_text
 
                 if attempt < max_retries:
                     wait = backoff * attempt
@@ -229,7 +286,9 @@ def execute_run(
                     time.sleep(wait)
                 else:
                     status = "Failed"
-                    error_message = f"awreason failed after {max_retries} attempts: {stderr_text[:500]}"
+                    if not last_error_detail:
+                        last_error_detail = _snippet(_first_non_empty(stderr_text, stdout_text, "<no stderr/stdout captured>"), 500)
+                    error_message = f"awreason failed after {max_retries} attempts: {last_error_detail}"
 
             # ── Extract token counts ──────────────────────────────────
             tokens_prompt, tokens_completion = _extract_tokens(stdout_text)
