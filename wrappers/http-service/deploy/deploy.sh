@@ -27,18 +27,39 @@ export MSYS_NO_PATHCONV=1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-ENV_FILE="${REPO_ROOT}/.env"
+ENV_FILE="${DEPLOY_ENV_FILE:-${REPO_ROOT}/.env}"
+
+# Allow relative DEPLOY_ENV_FILE paths (resolved from repo root)
+if [[ "$ENV_FILE" != /* ]]; then
+  ENV_FILE="${REPO_ROOT}/${ENV_FILE}"
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "ERROR: .env file not found at $ENV_FILE" >&2
   exit 1
 fi
 
+echo "Using environment file: $ENV_FILE"
+
 # ── Load .env (strip quotes) ─────────────────────────────────────────
 set -a
 # shellcheck disable=SC1090
 source <(sed 's/\r$//' "$ENV_FILE" | grep -v '^\s*#' | grep '=')
 set +a
+
+# Terraform's AzureRM provider also reads ARM_* variables. Override stale values
+# inherited from another shell/subscription with the selected deployment env.
+export ARM_SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID:-}"
+export ARM_TENANT_ID="${AZURE_TENANT_ID:-}"
+
+# Backward-compatible Entra defaults. setup-identity.sh app writes the
+# dedicated API values for new deployments.
+AAD_API_CLIENT_ID="${AAD_API_CLIENT_ID:-${AAD_CLIENT_ID:-}}"
+AAD_AUDIENCE="${AAD_AUDIENCE:-${AAD_API_CLIENT_ID}}"
+AAD_API_SCOPE="${AAD_API_SCOPE:-}"
+if [[ -z "$AAD_API_SCOPE" && -n "$AAD_API_CLIENT_ID" ]]; then
+  AAD_API_SCOPE="api://${AAD_API_CLIENT_ID}/access_as_user"
+fi
 
 # ── Set active subscription so all az commands target the right one ───
 if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
@@ -428,6 +449,16 @@ ensure_container_app_env() {
   fi
 
   if resource_exists az containerapp env show --name "$env_name" --resource-group "$env_rg"; then
+    local env_state
+    env_state=$(az containerapp env show \
+      --name "$env_name" \
+      --resource-group "$env_rg" \
+      --query "properties.provisioningState" -o tsv | tr -d '\r')
+    if [[ "$env_state" != "Succeeded" ]]; then
+      echo "ERROR: Container Apps Environment '$env_name' exists in state '$env_state'." >&2
+      echo "       Delete or replace the failed environment before continuing." >&2
+      exit 1
+    fi
     echo "  Container Apps Environment '$env_name' already exists – reusing."
   else
     echo "  Creating Container Apps Environment: $env_name in $env_rg"
@@ -713,10 +744,37 @@ do_build() {
   DOCKERFILE="${REPO_ROOT}/wrappers/http-service/Dockerfile"
 
   echo ""
+  echo "── Preparing minimal build context ─────────────────────────"
+  local build_ctx
+  build_ctx="$(mktemp -d 2>/dev/null || mktemp -d -t awr-http-buildctx)"
+
+  echo "── performing cleanup of prior builds ─────────────────────────"
+  cleanup_build_ctx() {
+    rm -rf "$build_ctx"
+  }
+  trap cleanup_build_ctx RETURN
+
+  echo "── completed cleanup of prior builds ─────────────────────────"
+
+  mkdir -p "$build_ctx/wrappers/http-service"
+
+  echo "── copying code to build context ─────────────────────────"
+  # Copy only files required by wrappers/http-service/Dockerfile.
+  cp "$REPO_ROOT/wrappers/http-service/Dockerfile" "$build_ctx/wrappers/http-service/Dockerfile"
+  cp "$REPO_ROOT/wrappers/http-service/requirements.txt" "$build_ctx/wrappers/http-service/requirements.txt"
+  cp "$REPO_ROOT/wrappers/http-service/supervisord.conf" "$build_ctx/wrappers/http-service/supervisord.conf"
+  cp "$REPO_ROOT/wrappers/http-service/nginx.conf" "$build_ctx/wrappers/http-service/nginx.conf"
+  cp -R "$REPO_ROOT/wrappers/http-service/app" "$build_ctx/wrappers/http-service/"
+  cp -R "$REPO_ROOT/o1-assessment" "$build_ctx/"
+
+  echo "── completed copying code to build context ─────────────────────────"
+  DOCKERFILE="$build_ctx/wrappers/http-service/Dockerfile"
+
+  echo ""
   echo "── Building & pushing image via ACR ────────────────────────"
   # Convert Git Bash paths to Windows paths for az CLI (a Windows process)
   local win_repo_root win_dockerfile
-  win_repo_root=$(cygpath -w "$REPO_ROOT" 2>/dev/null || echo "$REPO_ROOT")
+  win_repo_root=$(cygpath -w "$build_ctx" 2>/dev/null || echo "$build_ctx")
   win_dockerfile=$(cygpath -w "$DOCKERFILE" 2>/dev/null || echo "$DOCKERFILE")
   az acr build \
     --registry "${AZ_ACR_NAME}" \
@@ -725,6 +783,9 @@ do_build() {
     --image "${IMAGE_NAME}:latest" \
     --file "${win_dockerfile}" \
     "${win_repo_root}"
+
+  trap - RETURN
+  cleanup_build_ctx
 
   # Persist the tag so a subsequent 'apply' uses exactly the same one
   echo "${IMAGE_TAG}" > "${SCRIPT_DIR}/.last_image_tag"
@@ -802,6 +863,24 @@ _tf_import_if_needed() {
   fi
 }
 
+select_terraform_workspace() {
+  local env_basename workspace
+  env_basename=$(basename "$ENV_FILE")
+  if [[ "$env_basename" == ".env" ]]; then
+    workspace="default"
+  else
+    workspace="${DEPLOY_TF_WORKSPACE:-${env_basename#.env_}}"
+    workspace=$(printf '%s' "$workspace" | tr -c '[:alnum:]_-' '-')
+  fi
+
+  if terraform workspace select "$workspace" >/dev/null 2>&1; then
+    echo "  Terraform workspace: $workspace"
+  else
+    terraform workspace new "$workspace" >/dev/null
+    echo "  Terraform workspace created: $workspace"
+  fi
+}
+
 # ── Update Entra ID App Registration redirect URIs ────────────────
 # Called after Terraform apply when the ACA FQDN is known. Ensures
 # the app registration always has the current FQDN as a redirect URI
@@ -820,28 +899,47 @@ update_redirect_uris() {
   echo ""
   echo "── Updating Entra ID App Registration redirect URIs ────────"
 
-  local aca_uri="https://${fqdn}/"
-  local localhost_uri="http://localhost:8501/"
+  local aca_uri="https://${fqdn}/" redirect current_redirect
+  local redirect_uris=()
+  while IFS= read -r current_redirect; do
+    [[ -n "$current_redirect" ]] && redirect_uris+=("$current_redirect")
+  done < <(az ad app show --id "$AAD_CLIENT_ID" \
+    --query "web.redirectUris" -o tsv | tr -d '\r')
 
-  # Fetch current redirect URIs
-  local current_uris
-  current_uris=$(az ad app show --id "$AAD_CLIENT_ID" \
-    --query "web.redirectUris" -o tsv 2>/dev/null | tr -d '\r' || true)
+  add_redirect_uri() {
+    local candidate="$1"
+    for redirect in "${redirect_uris[@]}"; do
+      [[ "$redirect" == "$candidate" ]] && return
+    done
+    redirect_uris+=("$candidate")
+  }
 
-  # Check if the ACA URI is already present
-  if echo "$current_uris" | grep -qF "$aca_uri"; then
-    echo "  ✅ Redirect URI already up to date: $aca_uri"
-    return
+  add_redirect_uri "http://localhost:8501/"
+  add_redirect_uri "$aca_uri"
+  if [[ -n "${STREAMLIT_REDIRECT_URI:-}" ]]; then
+    local explicit_redirect="${STREAMLIT_REDIRECT_URI}"
+    [[ "$explicit_redirect" != */ ]] && explicit_redirect="${explicit_redirect}/"
+    add_redirect_uri "$explicit_redirect"
   fi
 
-  # Set redirect URIs: always include localhost + current ACA FQDN
   az ad app update \
     --id "$AAD_CLIENT_ID" \
-    --web-redirect-uris "$localhost_uri" "$aca_uri" \
-    -o none 2>/dev/null
+    --web-redirect-uris "${redirect_uris[@]}" \
+    -o none
   echo "  ✅ Redirect URIs updated:"
-  echo "     - $localhost_uri"
-  echo "     - $aca_uri"
+  printf '     - %s\n' "${redirect_uris[@]}"
+}
+
+configure_streamlit_session_affinity() {
+  echo ""
+  echo "── Configuring Streamlit session affinity ──────────────────"
+  az containerapp ingress sticky-sessions set \
+    --name "${AZ_CONTAINER_APP_NAME}" \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --subscription "${AZURE_SUBSCRIPTION_ID}" \
+    --affinity sticky \
+    --output none
+  echo "  ✅ Sticky sessions enabled for Streamlit WebSockets and uploads"
 }
 
 do_apply() {
@@ -863,6 +961,7 @@ _do_apply_impl() {
   echo ""
   echo "── Terraform init & apply ──────────────────────────────────"
   terraform init -upgrade
+  select_terraform_workspace
 
   # ── Auto-import pre-existing resources ──────────────────────────
   # Resources created by setup-identity.sh may already exist in Azure
@@ -887,6 +986,7 @@ _do_apply_impl() {
 
   if [[ "$proceed" == "y" ]]; then
     terraform apply -var-file=terraform.tfvars -auto-approve
+    configure_streamlit_session_affinity
     echo ""
     echo "✅ Deployment complete!"
     echo "   (nginx proxy_read_timeout is 600s for long-running assessments)"
@@ -901,10 +1001,15 @@ _do_apply_impl() {
       local url="https://${fqdn}/healthz"
       local max_attempts=20  # 20 × 10s = ~3.3 min
       local attempt=0
+      local curl_command="curl" curl_output_sink="/dev/null"
+      if command -v curl.exe >/dev/null 2>&1; then
+        curl_command="curl.exe"
+        curl_output_sink="NUL"
+      fi
       while (( attempt < max_attempts )); do
         attempt=$((attempt + 1))
         local status
-        if ! status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null); then
+        if ! status=$("$curl_command" -s -o "$curl_output_sink" -w "%{http_code}" --max-time 5 "$url" 2>/dev/null); then
           status="000"
         fi
         if [[ "$status" == "200" ]]; then
@@ -932,6 +1037,8 @@ do_yaml() {
   refresh_derived
   echo ""
   echo "── Deploying via ACA YAML manifest ─────────────────────────"
+  local resolved_yaml win_resolved_yaml
+  resolved_yaml="${SCRIPT_DIR}/_resolved-aca.yaml"
 
   # Resolve values for the YAML placeholders
   MI_RESOURCE_ID=$(az identity show \
@@ -948,6 +1055,32 @@ do_yaml() {
     --name "${AZ_CONTAINER_APP_ENV_NAME}" \
     --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
     --query id -o tsv | tr -d '\r' || true)
+
+  # Resolve a stable Streamlit redirect URI.
+  # Prefer explicit env override, else use current app FQDN,
+  # else derive from env default domain + app name.
+  local app_fqdn env_default_domain streamlit_redirect_uri
+  app_fqdn=$(az containerapp show \
+    --name "${AZ_CONTAINER_APP_NAME}" \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --query "properties.configuration.ingress.fqdn" -o tsv 2>/dev/null | tr -d '\r' || true)
+  env_default_domain=$(az containerapp env show \
+    --name "${AZ_CONTAINER_APP_ENV_NAME}" \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --query "properties.defaultDomain" -o tsv 2>/dev/null | tr -d '\r' || true)
+
+  streamlit_redirect_uri="${STREAMLIT_REDIRECT_URI:-}"
+  if [[ -z "${streamlit_redirect_uri}" ]]; then
+    if [[ -n "${app_fqdn}" ]]; then
+      streamlit_redirect_uri="https://${app_fqdn}/"
+    elif [[ -n "${env_default_domain}" ]]; then
+      streamlit_redirect_uri="https://${AZ_CONTAINER_APP_NAME}.${env_default_domain}/"
+    fi
+  fi
+  if [[ -n "${streamlit_redirect_uri}" ]] && [[ "${streamlit_redirect_uri}" != */ ]]; then
+    streamlit_redirect_uri="${streamlit_redirect_uri}/"
+  fi
+  echo "Using Streamlit redirect URI: ${streamlit_redirect_uri:-<unset>}"
 
   # Resolve Application Insights connection string
   local appi_conn_str=""
@@ -970,30 +1103,59 @@ do_yaml() {
     -e "s|{{ IMAGE_TAG }}|${IMAGE_TAG}|g" \
     -e "s|{{ AZ_STORAGE_NAME }}|${AZ_STORAGE_NAME}|g" \
     -e "s|{{ AZ_STORAGE_RG }}|${AZ_STORAGE_RG}|g" \
+    -e "s|{{ LOG_LEVEL }}|${LOG_LEVEL:-INFO}|g" \
+    -e "s|{{ PER_REPLICA_CONCURRENCY }}|${PER_REPLICA_CONCURRENCY:-4}|g" \
+    -e "s|{{ HTTP_MIN_REPLICAS }}|${HTTP_MIN_REPLICAS:-1}|g" \
+    -e "s|{{ HTTP_MAX_REPLICAS }}|${HTTP_MAX_REPLICAS:-1}|g" \
+    -e "s|{{ HTTP_SCALE_CONCURRENT_REQUESTS }}|${HTTP_SCALE_CONCURRENT_REQUESTS:-${PER_REPLICA_CONCURRENCY:-24}}|g" \
+    -e "s|{{ ACTIVE_REQUEST_IDS_DIR }}|${ACTIVE_REQUEST_IDS_DIR:-}|g" \
     -e "s|{{ AZURE_OPENAI_ENDPOINT }}|${AZURE_OPENAI_ENDPOINT}|g" \
-    -e "s|{{ APIM_AOAI_BASE_URL }}||g" \
-    -e "s|{{ AOAI_DEPLOYMENT }}|${AZURE_OPENAI_DEPLOYMENT_O1}|g" \
-    -e "s|{{ AOAI_API_VERSION }}|${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}|g" \
+    -e "s|{{ APIM_AOAI_BASE_URL }}|${APIM_AOAI_BASE_URL:-}|g" \
+    -e "s|{{ AOAI_DEPLOYMENT }}|${AOAI_DEPLOYMENT:-${AZURE_OPENAI_DEPLOYMENT_O1}}|g" \
+    -e "s|{{ AOAI_API_VERSION }}|${AOAI_API_VERSION:-${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}}|g" \
+    -e "s|{{ USE_AAD_FOR_AOAI }}|${USE_AAD_FOR_AOAI:-true}|g" \
+    -e "s|{{ AUTH_MODE }}|${AUTH_MODE:-none}|g" \
+    -e "s|{{ API_KEY }}|${API_KEY:-}|g" \
     -e "s|{{ AAD_ISSUER }}|https://login.microsoftonline.com/${AZURE_TENANT_ID}/v2.0|g" \
-    -e "s|{{ AAD_AUDIENCE }}|${AAD_CLIENT_ID}|g" \
+    -e "s|{{ AAD_AUDIENCE }}|${AAD_AUDIENCE}|g" \
+    -e "s|{{ AAD_REQUIRED_SCOPE }}|${AAD_REQUIRED_SCOPE:-access_as_user}|g" \
+    -e "s|{{ AAD_REQUIRED_APP_ROLE }}|${AAD_REQUIRED_APP_ROLE:-TalentMatch.Access}|g" \
     -e "s|{{ AZURE_TENANT_ID }}|${AZURE_TENANT_ID}|g" \
     -e "s|{{ AZURE_SUBSCRIPTION_ID }}|${AZURE_SUBSCRIPTION_ID}|g" \
     -e "s|{{ AAD_CLIENT_ID }}|${AAD_CLIENT_ID}|g" \
+    -e "s|{{ AAD_API_CLIENT_ID }}|${AAD_API_CLIENT_ID}|g" \
+    -e "s|{{ AAD_API_SCOPE }}|${AAD_API_SCOPE}|g" \
+    -e "s|{{ AAD_TENANT_ID }}|${AAD_TENANT_ID:-${AZURE_TENANT_ID}}|g" \
     -e "s|{{ AAD_CLIENT_SECRET }}|${AAD_CLIENT_SECRET}|g" \
+    -e "s|{{ STREAMLIT_REDIRECT_URI }}|${streamlit_redirect_uri}|g" \
+    -e "s|{{ AWREASON_MAX_RETRIES }}|${AWREASON_MAX_RETRIES:-3}|g" \
+    -e "s|{{ AWREASON_RETRY_BACKOFF }}|${AWREASON_RETRY_BACKOFF:-10}|g" \
     -e "s|{{ APPINSIGHTS_CONNECTION_STRING }}|${appi_conn_str}|g" \
     -e "s|{{ OTEL_ENDPOINT }}||g" \
-    "${SCRIPT_DIR}/aca-containerapp.yaml" > "${SCRIPT_DIR}/_resolved-aca.yaml"
+    "${SCRIPT_DIR}/aca-containerapp.yaml" > "${resolved_yaml}"
 
-  echo "Generated: ${SCRIPT_DIR}/_resolved-aca.yaml"
+  echo "Generated: ${resolved_yaml}"
 
-  az containerapp create \
-    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
-    --yaml "${SCRIPT_DIR}/_resolved-aca.yaml" \
-    2>/dev/null \
-  || az containerapp update \
-    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
-    --name "${AZ_CONTAINER_APP_NAME}" \
-    --yaml "${SCRIPT_DIR}/_resolved-aca.yaml"
+  if [[ ! -f "${resolved_yaml}" ]]; then
+    echo "ERROR: Resolved YAML was not created: ${resolved_yaml}" >&2
+    exit 1
+  fi
+
+  # az is a Windows process under Git Bash; pass Windows-form path for --yaml.
+  win_resolved_yaml=$(cygpath -w "${resolved_yaml}" 2>/dev/null || echo "${resolved_yaml}")
+
+  if resource_exists az containerapp show --name "${AZ_CONTAINER_APP_NAME}" --resource-group "${AZ_CONTAINER_APP_ENV_RG}"; then
+    az containerapp update \
+      --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+      --name "${AZ_CONTAINER_APP_NAME}" \
+      --yaml "${win_resolved_yaml}"
+  else
+    az containerapp create \
+      --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+      --yaml "${win_resolved_yaml}"
+  fi
+
+  configure_streamlit_session_affinity
 
   echo ""
   echo "✅ Deployed via YAML!"
@@ -1119,11 +1281,14 @@ do_preview() {
   echo "  API Ver:    ${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}"
   echo "  Auth:       Managed Identity (USE_AAD_FOR_AOAI=true)"
 
-  # ── Entra ID Auth (Streamlit) ───────────────────────────────────
+  # ── Entra ID Auth ───────────────────────────────────────────────
   echo ""
-  echo "── Entra ID Auth (Streamlit UX) ────────────────────────────"
-  echo "  App Reg:        ${AAD_APP_DISPLAY_NAME:-awreason-http-service}"
+  echo "── Entra ID Auth ────────────────────────────────────────────"
+  echo "  Streamlit App:  ${AAD_APP_DISPLAY_NAME:-awreason-streamlit}"
   echo "  Client ID:      ${AAD_CLIENT_ID:-<not set — run setup-identity.sh app>}"
+  echo "  API App ID:     ${AAD_API_CLIENT_ID:-<not set — run setup-identity.sh app>}"
+  echo "  API Scope:      ${AAD_API_SCOPE:-<not set — run setup-identity.sh app>}"
+  echo "  API App Role:   ${AAD_REQUIRED_APP_ROLE:-TalentMatch.Access}"
   if [[ -n "${AAD_CLIENT_SECRET:-}" ]]; then
     echo "  Client Secret:  <set>"
   else
@@ -1139,6 +1304,30 @@ do_preview() {
 
   local ready=true
 
+  if [[ -z "${AZ_CONTAINER_APP_ENV_RG:-}" ]]; then
+    echo "  ❌ AZ_CONTAINER_APP_ENV_RG is empty"
+    ready=false
+  else
+    echo "  ✅ Container Apps resource group is set"
+  fi
+
+  if [[ -z "${AZ_STORAGE_RG:-}" ]]; then
+    echo "  ❌ AZ_STORAGE_RG is empty"
+    ready=false
+  else
+    echo "  ✅ Storage resource group is set"
+  fi
+
+  if [[ -z "${AZ_AOAI_RESOURCE_NAME:-}" || -z "${AZ_AOAI_RESOURCE_RG:-}" ]] || \
+      ! resource_exists az cognitiveservices account show \
+        --name "${AZ_AOAI_RESOURCE_NAME:-}" \
+        --resource-group "${AZ_AOAI_RESOURCE_RG:-}"; then
+    echo "  ❌ Azure AI account is not configured or was not found"
+    ready=false
+  else
+    echo "  ✅ Azure AI account exists"
+  fi
+
   if [[ -z "${AAD_CLIENT_ID:-}" ]]; then
     echo "  ❌ AAD_CLIENT_ID is empty — run: bash setup-identity.sh app"
     ready=false
@@ -1153,7 +1342,19 @@ do_preview() {
     echo "  ✅ AAD_CLIENT_SECRET is set"
   fi
 
-  if [[ -z "${AZ_MI_PRINCIPAL_ID:-}" ]]; then
+  if [[ "${AUTH_MODE:-none}" == "entra" ]]; then
+    if [[ -z "${AAD_API_CLIENT_ID:-}" || -z "${AAD_API_SCOPE:-}" ]]; then
+      echo "  ❌ Entra API registration is incomplete — run: bash setup-identity.sh app"
+      ready=false
+    else
+      echo "  ✅ Entra API registration is configured"
+    fi
+  fi
+
+  if [[ -z "${AZ_MI_PRINCIPAL_ID:-}" ]] || \
+      ! resource_exists az identity show \
+        --name "${AZ_MI_NAME:-id-awreason-http-service}" \
+        --resource-group "${AZ_CONTAINER_APP_ENV_RG:-}"; then
     echo "  ❌ AZ_MI_PRINCIPAL_ID is empty — run: bash setup-identity.sh mi"
     ready=false
   else
@@ -1189,6 +1390,7 @@ case "$ACTION" in
   allforce)     do_infra; refresh_derived; print_banner; do_build; do_apply_force ;;
   *)
     echo "Usage: $0 {preview|infra|build|apply|applyforce|yaml|all|allforce}" >&2
+    echo "       Optional env override: DEPLOY_ENV_FILE=.env_qa $0 yaml" >&2
     echo ""
     echo "  preview     Show what will be deployed (no changes made)"
     echo "  infra       Ensure ACR, ACA env, storage exist"

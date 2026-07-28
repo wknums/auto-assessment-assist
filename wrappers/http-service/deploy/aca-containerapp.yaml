@@ -34,6 +34,8 @@ properties:
       external: true
       targetPort: 8000
       transport: auto
+      stickySessions:
+        affinity: sticky
       # Optional: restrict traffic to specific IP ranges / VNet
       # ipSecurityRestrictions: []
 
@@ -49,7 +51,7 @@ properties:
           - name: APP_NAME
             value: awreason-http-service
           - name: LOG_LEVEL
-            value: INFO
+            value: "{{ LOG_LEVEL }}"
 
           # ── Working directory ────────────────────────────
           - name: WORKDIR_BASE
@@ -57,7 +59,9 @@ properties:
 
           # ── Concurrency ─────────────────────────────────
           - name: PER_REPLICA_CONCURRENCY
-            value: "1"
+            value: "{{ PER_REPLICA_CONCURRENCY }}"
+          - name: ACTIVE_REQUEST_IDS_DIR
+            value: "{{ ACTIVE_REQUEST_IDS_DIR }}"
 
           # ── Azure Blob Storage ──────────────────────────
           - name: AZ_STORAGE_NAME
@@ -83,16 +87,27 @@ properties:
             value: "{{ AOAI_DEPLOYMENT }}"
           - name: AOAI_API_VERSION
             value: "{{ AOAI_API_VERSION }}"
+          # awreason.py (used by Streamlit direct path) expects these names.
+          - name: AZURE_OPENAI_DEPLOYMENT_O1
+            value: "{{ AOAI_DEPLOYMENT }}"
+          - name: AZURE_OPENAI_API_VERSION
+            value: "{{ AOAI_API_VERSION }}"
           - name: USE_AAD_FOR_AOAI
-            value: "true"
+            value: "{{ USE_AAD_FOR_AOAI }}"
 
           # ── Auth (Entra ID JWT) ─────────────────────────
           - name: AUTH_MODE
-            value: "none"            # Set to "entra" in production
+            value: "{{ AUTH_MODE }}"
+          - name: API_KEY
+            secretRef: api-key
           - name: AAD_ISSUER
             value: "{{ AAD_ISSUER }}"
           - name: AAD_AUDIENCE
             value: "{{ AAD_AUDIENCE }}"
+          - name: AAD_REQUIRED_SCOPE
+            value: "{{ AAD_REQUIRED_SCOPE }}"
+          - name: AAD_REQUIRED_APP_ROLE
+            value: "{{ AAD_REQUIRED_APP_ROLE }}"
 
           # ── Azure identity ──────────────────────────────
           - name: AZURE_TENANT_ID
@@ -105,8 +120,16 @@ properties:
             value: awreason-http-service
           - name: AAD_CLIENT_ID
             value: "{{ AAD_CLIENT_ID }}"
+          - name: AAD_API_CLIENT_ID
+            value: "{{ AAD_API_CLIENT_ID }}"
+          - name: AAD_API_SCOPE
+            value: "{{ AAD_API_SCOPE }}"
           - name: AAD_CLIENT_SECRET
             secretRef: aad-client-secret
+          - name: AAD_TENANT_ID
+            value: "{{ AAD_TENANT_ID }}"
+          - name: STREAMLIT_REDIRECT_URI
+            value: "{{ STREAMLIT_REDIRECT_URI }}"
           - name: AWR_API_ENDPOINT
             value: "http://localhost:8080"
           - name: AZURE_CLIENT_ID
@@ -117,9 +140,15 @@ properties:
             value: /app/o1-assessment/awreason.py
           - name: AWREASON_CLI_TIMEOUT
             value: "300"
+          - name: AWREASON_MAX_RETRIES
+            value: "{{ AWREASON_MAX_RETRIES }}"
+          - name: AWREASON_RETRY_BACKOFF
+            value: "{{ AWREASON_RETRY_BACKOFF }}"
 
-          # ── Telemetry (optional) ────────────────────────          - name: APPLICATIONINSIGHTS_CONNECTION_STRING
-            value: "{{ APPINSIGHTS_CONNECTION_STRING }}"          - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          # ── Telemetry (optional) ────────────────────────
+          - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+            value: "{{ APPINSIGHTS_CONNECTION_STRING }}"
+          - name: OTEL_EXPORTER_OTLP_ENDPOINT
             value: "{{ OTEL_ENDPOINT }}"
           - name: OTEL_SERVICE_NAME
             value: awreason-http-service
@@ -149,18 +178,20 @@ properties:
         storageType: EmptyDir
 
     scale:
-      minReplicas: 1
-      maxReplicas: 10
+      minReplicas: {{ HTTP_MIN_REPLICAS }}
+      maxReplicas: {{ HTTP_MAX_REPLICAS }}
       rules:
         - name: http-scale
           http:
             metadata:
-              concurrentRequests: "5"
+              concurrentRequests: "{{ HTTP_SCALE_CONCURRENT_REQUESTS }}"
 
   # ── Secrets ─────────────────────────────────────────────────
   secrets:
     - name: aad-client-secret
       value: "{{ AAD_CLIENT_SECRET }}"
+    - name: api-key
+      value: "{{ API_KEY }}"
   # Uncomment if using API-key auth instead of MI:
   #   - name: aoai-api-key
   #     value: "{{ AZURE_OPENAI_API_KEY }}"

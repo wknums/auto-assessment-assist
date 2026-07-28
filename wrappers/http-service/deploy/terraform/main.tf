@@ -25,6 +25,9 @@ terraform {
 
 provider "azurerm" {
   features {}
+
+  subscription_id = var.azure_subscription_id
+  tenant_id       = var.azure_tenant_id
 }
 
 # ── Variables ─────────────────────────────────────────────────────────
@@ -59,6 +62,39 @@ variable "image_tag" {
   type        = string
   default     = "latest"
   description = "Container image tag."
+}
+
+variable "http_min_replicas" {
+  type        = number
+  default     = 1
+  description = "Minimum number of HTTP service replicas."
+
+  validation {
+    condition     = var.http_min_replicas >= 0
+    error_message = "http_min_replicas must be zero or greater."
+  }
+}
+
+variable "http_max_replicas" {
+  type        = number
+  default     = 1
+  description = "Maximum number of HTTP service replicas."
+
+  validation {
+    condition     = var.http_max_replicas >= var.http_min_replicas
+    error_message = "http_max_replicas must be greater than or equal to http_min_replicas."
+  }
+}
+
+variable "http_scale_concurrent_requests" {
+  type        = number
+  default     = 24
+  description = "Concurrent HTTP requests per replica before scale-out."
+
+  validation {
+    condition     = var.http_scale_concurrent_requests >= 1
+    error_message = "http_scale_concurrent_requests must be at least one."
+  }
 }
 
 variable "blob_account_id" {
@@ -114,6 +150,30 @@ variable "aad_audience" {
   type        = string
   default     = ""
   description = "Expected JWT audience."
+}
+
+variable "aad_api_client_id" {
+  type        = string
+  default     = ""
+  description = "Client ID of the API resource app registration."
+}
+
+variable "aad_api_scope" {
+  type        = string
+  default     = ""
+  description = "Delegated scope requested by the Streamlit client."
+}
+
+variable "aad_required_scope" {
+  type        = string
+  default     = "access_as_user"
+  description = "Delegated scope claim required by the API."
+}
+
+variable "aad_required_app_role" {
+  type        = string
+  default     = "TalentMatch.Access"
+  description = "Application role claim required for service-to-service API access."
 }
 
 variable "aad_client_id" {
@@ -220,9 +280,9 @@ resource "azurerm_storage_account_network_rules" "vnet_access" {
 
   virtual_network_subnet_ids = [var.vnet_subnet_id]
 
-  # Preserve existing IP rules (managed outside Terraform via .env / deploy.sh)
+  # Preserve network exceptions managed by security tooling or deploy.sh.
   lifecycle {
-    ignore_changes = [ip_rules]
+    ignore_changes = [ip_rules, private_link_access]
   }
 }
 
@@ -233,6 +293,7 @@ resource "azurerm_container_app" "awreason" {
   container_app_environment_id = var.container_app_env_id
   resource_group_name          = var.resource_group_name
   revision_mode                = "Single"
+  workload_profile_name        = "Consumption"
 
   depends_on = [azurerm_role_assignment.acr_pull]
 
@@ -268,8 +329,13 @@ resource "azurerm_container_app" "awreason" {
   }
 
   template {
-    min_replicas = 1
-    max_replicas = 10
+    min_replicas = var.http_min_replicas
+    max_replicas = var.http_max_replicas
+
+    http_scale_rule {
+      name                = "http-scale"
+      concurrent_requests = tostring(var.http_scale_concurrent_requests)
+    }
 
     volume {
       name         = "workdir-emptydir"
@@ -294,7 +360,7 @@ resource "azurerm_container_app" "awreason" {
 
       env {
         name  = "PER_REPLICA_CONCURRENCY"
-        value = "1"
+        value = tostring(var.http_scale_concurrent_requests)
       }
 
       env {
@@ -353,6 +419,16 @@ resource "azurerm_container_app" "awreason" {
       }
 
       env {
+        name  = "AAD_REQUIRED_SCOPE"
+        value = var.aad_required_scope
+      }
+
+      env {
+        name  = "AAD_REQUIRED_APP_ROLE"
+        value = var.aad_required_app_role
+      }
+
+      env {
         name  = "AZURE_CLIENT_ID"
         value = azurerm_user_assigned_identity.awreason.client_id
       }
@@ -373,7 +449,17 @@ resource "azurerm_container_app" "awreason" {
       }
 
       env {
-        name      = "AAD_CLIENT_SECRET"
+        name  = "AAD_API_CLIENT_ID"
+        value = var.aad_api_client_id
+      }
+
+      env {
+        name  = "AAD_API_SCOPE"
+        value = var.aad_api_scope
+      }
+
+      env {
+        name        = "AAD_CLIENT_SECRET"
         secret_name = "aad-client-secret"
       }
 
@@ -430,8 +516,8 @@ resource "azurerm_container_app" "awreason" {
         path      = "/healthz"
         port      = 8000
 
-        initial_delay    = 5
-        interval_seconds = 30
+        initial_delay           = 5
+        interval_seconds        = 30
         failure_count_threshold = 3
       }
 
@@ -440,8 +526,8 @@ resource "azurerm_container_app" "awreason" {
         path      = "/ready"
         port      = 8000
 
-        initial_delay    = 10
-        interval_seconds = 15
+        initial_delay           = 10
+        interval_seconds        = 15
         failure_count_threshold = 3
       }
     }

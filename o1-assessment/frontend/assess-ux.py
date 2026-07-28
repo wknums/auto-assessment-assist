@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 
 # Import authentication module
-from auth import require_auth, get_user_display, logout, is_running_on_azure
+from auth import require_auth, get_user_display, logout, is_auth_enabled
 
 # Import Azure OpenAI client utilities
 try:
@@ -582,7 +582,7 @@ def main():
         return  # login page is being shown
 
     # Show signed-in user in sidebar (Azure only)
-    if is_running_on_azure():
+    if is_auth_enabled():
         with st.sidebar:
             st.markdown(f"**Signed in as:** {get_user_display(user_claims)}")
             if st.button("Sign out"):

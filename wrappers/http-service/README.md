@@ -9,6 +9,8 @@ Client
   │
   ├─ POST /assess          ─► download inputs from Blob → run awreason N times → upload artifacts → return JSON
   ├─ POST /assess/upload   ─► multipart file uploads (same pipeline)
+  ├─ GET  /assess/status/{requestId} ─► check if a request is actively processing on this replica
+  ├─ GET  /assess/status   ─► list active requests on this replica
   ├─ POST /aggregate-runs  ─► download/inline results → compute aggregates → return JSON
   ├─ GET  /healthz         ─► liveness probe
   └─ GET  /ready           ─► readiness probe (workdir + credential check)
@@ -23,7 +25,8 @@ Client
 | **Blob Storage** | `DefaultAzureCredential` (Managed Identity) – **no SAS** per corporate policy |
 | **APIM AI Gateway** | Optional routing through Azure API Management; bearer token obtained via MI |
 | **AuthN/AuthZ** | Pluggable JWT verifier for Microsoft Entra ID; `AUTH_REQUIRED=false` for dev |
-| **Concurrency** | Per-replica `asyncio.Semaphore` (`PER_REPLICA_CONCURRENCY`) |
+| **Concurrency** | Per-replica `asyncio.Semaphore` (`PER_REPLICA_CONCURRENCY`, default `4`) |
+| **Request status** | Disk-backed active request markers with `GET /assess/status/{requestId}` |
 | **Telemetry** | OpenTelemetry (OTLP), structured JSON logs, `correlationId` on every log line |
 | **Error handling** | RFC 7807 `application/problem+json`; secrets never leaked |
 | **Containerised** | Non-root Docker image, ACA manifest with EmptyDir, probes, scaling rules |
@@ -77,6 +80,9 @@ Browse to <http://localhost:8080/docs> for the interactive Swagger UI.
 # Liveness
 curl http://localhost:8080/healthz
 
+# Request status (caller should provide X-Request-ID on assess requests)
+curl http://localhost:8080/assess/status/my-request-id
+
 # Assess (JSON mode – needs real blob URIs)
 curl -X POST http://localhost:8080/assess \
   -H "Content-Type: application/json" \
@@ -123,9 +129,10 @@ docker run -p 8080:8080 \
 
 ## Deploy to Azure Container Apps
 
-All deployment configuration is driven from the **repo-root `.env`** file.
-The `AZ_*_REUSE` flags control whether each resource is reused (must exist)
-or auto-created if missing.
+Deployment configuration defaults to the **repo-root `.env`** file. Set
+`DEPLOY_ENV_FILE` to use another file; relative paths are resolved from the
+repository root by both deployment scripts. The `AZ_*_REUSE` flags control
+whether each resource is reused (must exist) or auto-created if missing.
 
 ### Step 1 – Setup identity & app registration
 
@@ -137,19 +144,55 @@ bash setup-identity.sh mi           # managed identity + roles only
 bash setup-identity.sh app          # app registration only
 bash setup-identity.sh status       # show current state
 bash setup-identity.sh mi --yes     # MI + roles, auto-approve
+
+# Use a different env file for identity setup and deployment
+export DEPLOY_ENV_FILE=.env_qa
+bash setup-identity.sh mi --yes
+bash deploy.sh all
 ```
 
 This script:
 - Creates a **User-Assigned Managed Identity** and assigns *Storage Blob Data Contributor* + *Cognitive Services OpenAI User* roles.
-- Creates an **Entra ID App Registration** with a client secret, `User.Read` permission, and redirect URIs (localhost + ACA FQDN).
-- At the end, displays all pending `.env` changes (old → new) and prompts for confirmation before writing.
+- Creates an **API App Registration** exposing delegated scope `access_as_user`
+  and application role `TalentMatch.Access`.
+- Creates a separate confidential **Streamlit App Registration**, grants it the
+  delegated API scope, and configures localhost plus ACA redirect URIs.
+- Assigns `TalentMatch.Access` to the service principal identified by
+  `TALENT_MATCH_CLIENT_ID` when that variable is set.
+- At the end, displays all pending changes to the selected env file (old → new) and prompts for confirmation before writing.
 - Pass `-y` / `--yes` to skip the interactive prompt and auto-approve.
 - Respects `AZ_IDENTITIES_REUSE` – when `TRUE`, the MI must already exist.
 
 > **Caveat:** If you decline the `.env` write and re-run, `AAD_CLIENT_SECRET` will
-> still be empty in `.env`, so the script will call `az ad app credential reset`
-> to generate a new secret — **invalidating any previously generated one**. This is
-> expected since the old value was never persisted.
+> still be empty in `.env`, so the script will append another client credential.
+> Remove the unused credential from Entra after confirming which secret is active.
+
+For production Entra authentication, configure:
+
+```dotenv
+AUTH_MODE=entra
+AAD_APP_DISPLAY_NAME=awreason-streamlit
+AAD_API_APP_DISPLAY_NAME=awreason-http-service-api
+STREAMLIT_REDIRECT_URI=https://<streamlit-host>/
+TALENT_MATCH_CLIENT_ID=<talent-match-application-client-id>
+```
+
+`setup-identity.sh app` writes `AAD_CLIENT_ID`, `AAD_CLIENT_SECRET`,
+`AAD_API_CLIENT_ID`, `AAD_API_SCOPE`, and the backend audience/claim settings to
+the selected env file. Streamlit requests `AAD_API_SCOPE`. Talent Match requests
+`api://<AAD_API_CLIENT_ID>/.default` with client credentials or managed identity;
+its token must contain the `TalentMatch.Access` role.
+
+The script attempts tenant-wide delegated consent. If it reports consent as
+pending, a tenant administrator must grant admin consent to
+`awreason-streamlit` in the Entra admin center, unless tenant policy allows
+individual user consent. Run `bash setup-identity.sh status` to verify consent,
+scope, role, redirect, and Talent Match assignment state.
+
+The API registration must be dedicated to this deployment. The setup script
+refuses to replace an existing registration that contains unrelated scopes or
+app roles. Existing Streamlit redirects are preserved, and
+`STREAMLIT_REDIRECT_URI` is registered when supplied.
 
 ### Step 2 – Deploy (infra + build + apply)
 
@@ -162,13 +205,22 @@ bash deploy.sh build            # build & push image via ACR Tasks
 bash deploy.sh apply            # terraform apply only (with confirmation)
 bash deploy.sh applyforce       # terraform apply only (no confirmation)
 bash deploy.sh yaml             # deploy via ACA YAML (no Terraform)
+
+# Use a different env file (for example QA)
+DEPLOY_ENV_FILE=.env_qa bash deploy.sh yaml
 ```
+
+Terraform deployments isolate state by env filename: `.env` uses the existing
+`default` workspace, while `.env_qa_mcaps` uses `qa_mcaps`. Set
+`DEPLOY_TF_WORKSPACE` to choose another stable workspace explicitly.
 
 The deploy script:
 - **Auto-creates** ACR, Container Apps Environment, and Storage Account when `AZ_*_REUSE=FALSE` and the resource doesn't exist.  Generated names are written back to `.env`.
 - **Fails fast** when `AZ_*_REUSE=TRUE` and the resource is missing.
 - Builds the Docker image **remotely** via `az acr build` (no local Docker needed).
 - Generates `terraform.tfvars` from `.env` via `gen-tfvars.sh`, then runs `terraform plan/apply`.
+- Loads deployment settings from `DEPLOY_ENV_FILE` when provided; otherwise defaults to repo-root `.env`.
+- For `yaml` deploys, injects critical runtime values from the selected env file, including auth mode, API key secret, AOAI deployment/version, retries, concurrency, and active-request tracking folder.
 
 ### REUSE flags
 
@@ -184,7 +236,12 @@ The deploy script:
 **Option A – YAML manifest** (after `setup-identity.sh` and `deploy.sh infra`):
 ```bash
 bash deploy.sh yaml
+
+# QA example
+DEPLOY_ENV_FILE=.env_qa bash deploy.sh yaml
 ```
+
+Important: `deploy.sh yaml` now updates an existing Container App when present, and only creates a new app when it does not already exist.
 
 **Option B – Terraform only:**
 ```bash
@@ -215,6 +272,10 @@ The folder is **always** removed in a `finally` block – even on errors or time
 The `PER_REPLICA_CONCURRENCY` semaphore ensures that only *N* runs execute
 concurrently on each replica, preventing resource exhaustion on the EmptyDir volume.
 
+Active request IDs are tracked as marker files under `ACTIVE_REQUEST_IDS_DIR`
+(default: `<WORKDIR_BASE>/active-requests`) while requests are executing.
+The status endpoints read those marker files to report in-flight request state.
+
 ---
 
 ## File structure
@@ -236,12 +297,13 @@ wrappers/http-service/
 │   ├── aoai_client.py        # APIM → AOAI caller (MI token)
 │   ├── telemetry.py          # OpenTelemetry + JSON logging
 │   ├── deps.py               # JWT auth, correlation-ID, semaphore
+│   ├── request_tracker.py    # Active request marker file helpers
 │   ├── cleanup.py            # per-run workdir context manager
 │   ├── utils.py              # GUID, timing, MIME helpers
 │   └── settings.sample.env   # example env values
 ├── supervisord.conf          # runs API + Streamlit in one container
 ├── deploy/
-│   ├── deploy.sh             # main deployment script (.env-driven)
+│   ├── deploy.sh             # main deployment script (defaults to .env, override with DEPLOY_ENV_FILE)
 │   ├── setup-identity.sh     # MI, role assignments, App Registration
 │   ├── aca-containerapp.yaml # ACA YAML manifest (template)
 │   └── terraform/

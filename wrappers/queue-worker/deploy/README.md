@@ -61,9 +61,11 @@ The reconstructed ACA manifest in [wrappers/queue-worker/deploy/aca-containerapp
 - Authentication: user-assigned managed identity via `custom.identity`
 - Queue target: `queueName={{ SB_QUEUE }}`
 - Namespace target: `namespace={{ SB_NAMESPACE_NAME }}`
-- Target depth: `messageCount=5`
-- Bounds: `minReplicas=1`, `maxReplicas=50`
-- Polling/cooldown: `30s` / `300s`
+- Target depth: `messageCount=1`
+- Bounds: `minReplicas=3`, `maxReplicas=50`
+- Polling/cooldown: `5s` / `120s`
+
+These defaults are intentionally biased toward burst fan-out validation rather than cost minimization. For small E2E batches, they reduce scaler reaction lag so queue wait does not dominate model execution time.
 
 The Service Bus namespace name in the scale rule must be the bare namespace name, not the fully-qualified host name. For example:
 
@@ -98,6 +100,7 @@ Ensure `.env_qa` has the required values used by the script and YAML, including:
 - `AZ_MI_NAME` / resolved MI IDs
 - `SB_NAMESPACE`, `SB_RUNS_QUEUE`, `SB_RESULTS_QUEUE`
 - `AZ_STORAGE_NAME`, `AZ_STORAGE_RG`
+- `QUEUE_WORKER_PER_REPLICA_CONCURRENCY` (recommended) or `PER_REPLICA_CONCURRENCY` (legacy fallback)
 
 ### 2) Preview Effective Settings
 

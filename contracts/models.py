@@ -117,6 +117,9 @@ class RunResultMessage(BaseModel):
     tokens_completion: int
     error_message: Optional[str] = None
     correlation_id: str
+    dequeued_at: Optional[str] = None
+    started_at: Optional[str] = None
+    engine_completed_at: Optional[str] = None
     artifacts: Optional[List[ArtifactItem]] = None
 
 
@@ -133,4 +136,7 @@ class FinishRunRequest(BaseModel):
     tokens_prompt: int
     tokens_completion: int
     error_message: Optional[str] = None
+    dequeued_at: Optional[str] = None
+    started_at: Optional[str] = None
+    engine_completed_at: Optional[str] = None
     artifacts: Optional[List[ArtifactItem]] = None

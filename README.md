@@ -86,108 +86,185 @@ copy the endpoint of your Azure OpenAI resource and paste it into the value for 
 
 save the .env file
 
-### Deploying to Azure (AWReason HTTP Engine)
+## HTTP Service Deployment to a New Azure Subscription
 
-The AWReason HTTP engine API (`wrappers/http-service`) includes fully
-scripted deployment to **Azure Container Apps**. All deployment code lives
-under `wrappers/http-service/deploy/` and uses a combination of Azure CLI
-commands and Terraform.
+The API in `wrappers/http-service` deploys to Azure Container Apps. The
+deployment is hybrid: Azure CLI creates the supporting resources and Terraform
+deploys the Container App, managed identity, role assignments, and storage
+network rules. Use `deploy.sh yaml` instead of Terraform when required.
 
-#### Prerequisites
+### Prerequisites
 
-- **Azure CLI** (`az`) installed and authenticated (`az login`)
-- **Terraform** installed (for the `apply` phase; alternatively use the
-  `yaml` command for a Terraform-free deploy)
-- **`.env`** file at the repo root with `AZURE_SUBSCRIPTION_ID` and the
-  `AZ_*` deployment variables configured (see `.env_sample`)
+- Azure CLI (`az`) authenticated with `az login`
+- Terraform 1.5 or newer for the default deployment path
+- Permission to create resources and role assignments in the target subscription
+- Microsoft Entra permission to create app registrations, expose API permissions,
+  and assign app roles (Application Administrator or equivalent)
+- An existing Azure OpenAI resource and model deployment; this deployment does
+  not create Azure OpenAI, API Management, or Key Vault
 
-#### What Gets Deployed
+### Configure the Target Subscription
 
-| Resource | Purpose |
-|---|---|
-| Azure Container Registry | Hosts the Docker image |
-| Azure Container Apps Environment | Serverless container host (Consumption tier) |
-| Azure Container App | Runs the AWReason HTTP API |
-| User-Assigned Managed Identity | Passwordless auth to Storage & Azure OpenAI |
-| Azure Blob Storage | Assessment file upload/download |
-| Log Analytics Workspace | Container and application logs |
-| Application Insights | APM, distributed tracing, metrics |
-| VNet + Subnet *(optional)* | Network isolation for storage firewall |
-| Entra ID App Registration | OAuth2 for the Streamlit frontend |
+Create a deployment env file at the repository root, for example
+`.env_new_subscription`. Both deployment scripts accept paths relative to the
+repository root through `DEPLOY_ENV_FILE`.
 
-#### Deployment Steps
+At minimum, set the subscription, tenant, region, resource groups, Azure OpenAI
+resource, and runtime settings. For resources that should be created in the new
+subscription, set their reuse flags to `FALSE`:
 
-**1. Configure `.env`**
+```dotenv
+AZURE_SUBSCRIPTION_ID=<subscription-id>
+AZURE_TENANT_ID=<tenant-id>
+AZ_LOCATION=swedencentral
 
-Copy `.env_sample` to `.env` and set the required `AZ_*` variables.
-Each resource has a `_REUSE` flag — set to `TRUE` to reference an
-existing resource, or `FALSE` to let the scripts create it.
+AZ_CORE_RG_NAME=<resource-group>
+AZ_STORAGE_RG=<resource-group>
+AZ_ACR_RG=<resource-group>
+AZ_LOGANALYTICS_RG=<resource-group>
+AZ_APPINSIGHTS_RG=<resource-group>
+AZ_CONTAINER_APP_ENV_RG=<resource-group>
 
-**2. Set up identity and RBAC**
+AZ_STORAGE_NAME=
+AZ_ACR_NAME=
+AZ_LOGANALYTICS_NAME=
+AZ_APPINSIGHTS_NAME=
+AZ_CONTAINER_APP_ENV_NAME=
+
+AZ_STORAGE_REUSE=FALSE
+AZ_ACR_REUSE=FALSE
+AZ_LOGANALYTICS_REUSE=FALSE
+AZ_APPINSIGHTS_REUSE=FALSE
+AZ_CONTAINER_APP_ENV_REUSE=FALSE
+AZ_IDENTITIES_REUSE=FALSE
+
+AZURE_OPENAI_ENDPOINT=https://<account>.openai.azure.com/
+AZ_AOAI_RESOURCE_NAME=<account>
+AZ_AOAI_RESOURCE_RG=<azure-openai-resource-group>
+AZURE_OPENAI_DEPLOYMENT_O1=<model-deployment>
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+
+AUTH_MODE=entra
+AAD_APP_DISPLAY_NAME=awreason-streamlit
+AAD_API_APP_DISPLAY_NAME=awreason-http-service-api
+AAD_CLIENT_ID=
+AAD_CLIENT_SECRET=
+AAD_API_CLIENT_ID=
+AAD_API_SCOPE=
+STREAMLIT_REDIRECT_URI=https://<streamlit-host>/
+
+# Set this when Talent Match already has an app registration.
+TALENT_MATCH_CLIENT_ID=<talent-match-application-client-id>
+```
+
+Resource names such as `AZ_STORAGE_NAME`, `AZ_ACR_NAME`, and
+`AZ_CONTAINER_APP_ENV_NAME` can be supplied explicitly or left empty for the
+scripts to generate and write back to the selected env file.
+
+For VNet integration, add:
+
+```dotenv
+AZ_VNET_ENABLED=TRUE
+AZ_VNET_REUSE=FALSE
+AZ_VNET_RG=<resource-group>
+AZ_VNET_ADDRESS_PREFIX=10.200.0.0/16
+AZ_VNET_SUBNET_NAME=snet-aca
+AZ_VNET_SUBNET_PREFIX=10.200.0.0/23
+```
+
+This creates a delegated Container Apps subnet with a `Microsoft.Storage`
+service endpoint and restricts the storage firewall to that subnet. It does not
+create Private Endpoints or Private DNS zones.
+
+### Deploy
+
+From Git Bash:
 
 ```bash
 cd wrappers/http-service/deploy
-bash setup-identity.sh mi     # Creates Managed Identity + role assignments
-bash setup-identity.sh app    # Creates Entra ID App Registration
+export DEPLOY_ENV_FILE=.env_new_subscription
+
+# Create storage, ACR, monitoring, optional VNet, and ACA environment.
+bash deploy.sh infra
+
+# Create the managed identity and its role assignments.
+bash setup-identity.sh mi --yes
+
+# Create the API and Streamlit app registrations and assign API permissions.
+bash setup-identity.sh app --yes
+
+# Build remotely with ACR Tasks and deploy through Terraform.
+bash deploy.sh build
+bash deploy.sh apply
 ```
 
-This creates the Managed Identity with **Storage Blob Data Contributor**
-and **Cognitive Services OpenAI User** roles, and optionally an Entra ID
-App Registration for frontend OAuth2 auth.
+Non-default env files use an isolated Terraform workspace derived from the env
+filename (for example, `.env_qa_mcaps` uses workspace `qa_mcaps`). This prevents
+state from another subscription from being reused accidentally. Override it
+with `DEPLOY_TF_WORKSPACE` when a different stable workspace name is required.
 
-**3. Run the deployment**
+The app-registration step creates two single-tenant registrations:
+
+- `awreason-http-service-api` exposes delegated scope `access_as_user` for
+  Streamlit and application role `TalentMatch.Access` for service callers.
+- `awreason-streamlit` is the confidential web client. It requests a delegated
+  access token and forwards it to protected API routes.
+
+The setup script attempts tenant-wide consent for the delegated permission. If
+the signed-in principal lacks a suitable Entra directory role, a tenant
+administrator must grant admin consent for `awreason-streamlit` in the Entra
+admin center before sign-in, unless tenant policy allows individual user
+consent. Verify the result with:
 
 ```bash
-bash deploy.sh all
+bash setup-identity.sh status
 ```
 
-This executes three phases in order:
+When `TALENT_MATCH_CLIENT_ID` is set, the script assigns `TalentMatch.Access` to
+that service principal. Talent Match requests an app-only token using scope
+`api://<AAD_API_CLIENT_ID>/.default` and sends it as
+`Authorization: Bearer <access-token>`. No Talent Match secret is stored here.
 
-1. **`infra`** — Ensures all Azure resources exist (storage account, ACR,
-   Log Analytics, App Insights, VNet if enabled, Container Apps
-   environment, storage firewall rules).
-2. **`build`** — Builds the Docker image via ACR Tasks (remote build,
-   no local Docker required) and pushes it to ACR.
-3. **`apply`** — Generates `terraform.tfvars` from `.env` values and
-   Azure CLI lookups, then runs `terraform init`, `plan`, and `apply`
-   to deploy the Container App with all environment variables, probes,
-   and secrets configured.
+The deployment updates the Streamlit registration with the final Container App
+HTTPS redirect URI. If the Talent Match registration is created later, set
+`TALENT_MATCH_CLIENT_ID` and rerun `bash setup-identity.sh app --yes`; the
+operation is idempotent.
 
-You can also run phases individually: `bash deploy.sh infra`,
-`bash deploy.sh build`, or `bash deploy.sh apply`.
+Use a dedicated API registration: setup refuses to overwrite an app containing
+unrelated scopes or roles. Existing Streamlit redirect URIs are preserved, and
+`STREAMLIT_REDIRECT_URI` is registered when set.
 
-**4. Verify**
+Running `bash deploy.sh all` performs infrastructure, build, and Terraform apply,
+but the explicit sequence above is recommended for a new subscription because
+identity role assignment requires the target resources to exist first.
 
-```bash
-bash deploy.sh preview    # Dry-run check of current state and readiness
-```
-
-#### VNet Integration (Optional)
-
-By default the deployment runs without a VNet. To enable network
-isolation (required if your storage account firewall blocks public
-access):
-
-1. Set `AZ_VNET_ENABLED=TRUE` in `.env`
-2. Optionally configure `AZ_VNET_ADDRESS_PREFIX` and
-   `AZ_VNET_SUBNET_PREFIX`
-3. Run `bash deploy.sh all`
-
-This creates a VNet with a subnet delegated to Container Apps and a
-`Microsoft.Storage` service endpoint, then configures the storage
-account firewall to allow only VNet traffic.
-
-#### Alternative: YAML-Based Deploy (No Terraform)
+To deploy the Container App without Terraform after the infrastructure and
+identity steps:
 
 ```bash
+bash deploy.sh build
 bash deploy.sh yaml
 ```
 
-Deploys the Container App using the ACA YAML manifest
-(`aca-containerapp.yaml`) instead of Terraform. Useful for simpler
-setups or environments where Terraform is not available.
+### Reuse Existing Resources
 
-#### Queue Worker Deployment
+Set the corresponding `AZ_*_REUSE` flag to `TRUE` and provide its name and
+resource group. The scripts validate that the resource exists rather than
+creating it. The HTTP deployment directly supports reuse for Storage, ACR, Log
+Analytics, Application Insights, VNet, Container Apps Environment, and managed
+identity.
+
+### Verify
+
+```bash
+bash deploy.sh preview
+bash setup-identity.sh status
+```
+
+For command variants and manual deployment options, see
+`wrappers/http-service/README.md`.
+
+### Queue Worker Deployment
 
 A separate Service Bus–driven queue worker is also available for
 auto-scaling batch processing. See the **AWReason Engine – Service Bus

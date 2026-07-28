@@ -51,7 +51,11 @@ def get_semaphore() -> asyncio.Semaphore:
 
 async def set_correlation_id(request: Request) -> str:
     """Read ``X-Correlation-ID`` header or generate a new one, then set contextvars."""
-    cid = request.headers.get("X-Correlation-ID") or uuid.uuid4().hex
+    cid = (
+        request.headers.get("X-Correlation-ID")
+        or correlation_id_var.get("")
+        or uuid.uuid4().hex
+    )
     correlation_id_var.set(cid)
     return cid
 
@@ -125,6 +129,7 @@ def _verify_entra_jwt(
             issuer=settings.aad_issuer,
             options={"verify_exp": True},
         )
+        _authorize_entra_claims(payload)
         logger.debug("Token verified for sub=%s", payload.get("sub"))
         return payload
 
@@ -137,6 +142,26 @@ def _verify_entra_jwt(
     except jwt.PyJWTError as exc:
         logger.warning("JWT validation failed: %s", exc)
         raise HTTPException(status_code=401, detail="Invalid token.")
+
+
+def _authorize_entra_claims(payload: dict) -> None:
+    """Require the delegated API scope or the service application role."""
+    scopes = set(str(payload.get("scp", "")).split())
+    raw_roles = payload.get("roles", [])
+    roles = {raw_roles} if isinstance(raw_roles, str) else set(raw_roles)
+
+    if settings.aad_required_scope in scopes:
+        return
+    if settings.aad_required_app_role in roles:
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"Token requires scope '{settings.aad_required_scope}' or "
+            f"application role '{settings.aad_required_app_role}'."
+        ),
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════

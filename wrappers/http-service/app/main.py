@@ -8,6 +8,7 @@ This is the entry-point module:  ``uvicorn app.main:app``
 from __future__ import annotations
 
 import os
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -17,6 +18,7 @@ from fastapi.responses import JSONResponse
 from app.api import assess_router, health_router
 from app.config import settings
 from app.models import ProblemDetail
+from app.request_tracker import get_tracking_dir
 from app.telemetry import (
     correlation_id_var,
     init_opentelemetry,
@@ -40,11 +42,13 @@ async def lifespan(app: FastAPI):
 
     # Create workdir base if it doesn't exist yet
     os.makedirs(settings.workdir_base, exist_ok=True)
+    tracking_dir = get_tracking_dir()
 
     logger.info(
-        "Service started (concurrency=%d, workdir=%s, auth=%s, apim=%s).",
+        "Service started (concurrency=%d, workdir=%s, active_request_dir=%s, auth=%s, apim=%s).",
         settings.per_replica_concurrency,
         settings.workdir_base,
+        str(tracking_dir),
         settings.auth_mode,
         bool(settings.apim_aoai_base_url),
     )
@@ -92,11 +96,14 @@ app.add_middleware(
 @app.middleware("http")
 async def add_correlation_header(request: Request, call_next):
     """Echo the correlation ID back in every response."""
-    response = await call_next(request)
-    cid = correlation_id_var.get("")
-    if cid:
+    cid = request.headers.get("X-Correlation-ID") or uuid.uuid4().hex
+    context_token = correlation_id_var.set(cid)
+    try:
+        response = await call_next(request)
         response.headers["X-Correlation-ID"] = cid
-    return response
+        return response
+    finally:
+        correlation_id_var.reset(context_token)
 
 
 # ── Global exception handler → problem+json ──────────────────────────

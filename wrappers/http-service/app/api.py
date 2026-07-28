@@ -20,6 +20,9 @@ from app.cleanup import new_run_workdir
 from app.config import settings
 from app.deps import get_semaphore, set_correlation_id, verify_token
 from app.models import (
+    ActiveRequestsResponse,
+    AGGREGATION_PROFILE_CV,
+    AGGREGATION_PROFILE_GENERIC,
     AggregateRunsRequest,
     AggregateRunsResponse,
     AggregationStats,
@@ -28,9 +31,15 @@ from app.models import (
     AssessResponse,
     MustHaveResult,
     ProblemDetail,
+    RequestStatusResponse,
     SingleRunResult,
     TimingsMs,
     TokenUsage,
+)
+from app.request_tracker import (
+    get_request_status,
+    list_active_requests,
+    track_active_request,
 )
 from app.storage_blob import (
     can_resolve_credential,
@@ -53,6 +62,10 @@ logger = get_logger(__name__)
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 _MARKDOWN_SUFFIXES = {".md", ".txt", ".docx"}
 _PDF_SUFFIXES = {".pdf"}
+_ALLOWED_AGGREGATION_PROFILES = {
+    AGGREGATION_PROFILE_GENERIC,
+    AGGREGATION_PROFILE_CV,
+}
 
 # ══════════════════════════════════════════════════════════════════════
 #  Routers
@@ -105,6 +118,30 @@ async def ready():
     return {"status": "ready"}
 
 
+@assess_router.get(
+    "/assess/status/{request_id}",
+    response_model=RequestStatusResponse,
+    summary="Get request processing status",
+)
+async def assess_status(request_id: str):
+    """Return active processing status for a request ID."""
+    return get_request_status(request_id)
+
+
+@assess_router.get(
+    "/assess/status",
+    response_model=ActiveRequestsResponse,
+    summary="List all active processing requests",
+)
+async def assess_status_list():
+    """Return currently tracked active requests for this replica."""
+    active_requests = list_active_requests()
+    return ActiveRequestsResponse(
+        activeCount=len(active_requests),
+        requests=active_requests,
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  POST /assess  –  JSON mode
 # ──────────────────────────────────────────────────────────────────────
@@ -130,129 +167,141 @@ async def assess_json(
 
     rid = uuid.uuid4().hex
     run_id_var.set(rid)
+    request_id = _resolve_request_id(request=request, correlation_id=cid, run_id=rid)
 
     sem = get_semaphore()
     io_start = now_ms()
 
     async with sem:
-        try:
-            async with new_run_workdir(base=settings.workdir_base, run_id=rid) as run_dir:
-                # ── Download inputs ───────────────────────────────────
-                downloads_dir = run_dir / "downloads"
-                downloads_dir.mkdir()
+        with track_active_request(
+            request_id,
+            metadata={
+                "endpoint": request.url.path,
+                "method": request.method,
+                "runId": rid,
+                "jobId": body.job_id,
+                "applicationId": body.application_id,
+                "correlationId": cid,
+            },
+        ):
+            try:
+                async with new_run_workdir(base=settings.workdir_base, run_id=rid) as run_dir:
+                    # ── Download inputs ───────────────────────────────────
+                    downloads_dir = run_dir / "downloads"
+                    downloads_dir.mkdir()
 
-                prompt_file = await download_blob_to_path(
-                    body.prompt_blob_uri,
-                    downloads_dir / _blob_filename(body.prompt_blob_uri),
-                )
-
-                pdf_files: List[Path] = []
-                for uri in body.cv_blob_uris:
-                    local = await download_blob_to_path(
-                        uri, downloads_dir / _blob_filename(uri)
-                    )
-                    pdf_files.append(local)
-
-                spec_file: Optional[Path] = None
-                if body.spec_blob_uri:
-                    spec_file = await download_blob_to_path(
-                        body.spec_blob_uri,
-                        downloads_dir / _blob_filename(body.spec_blob_uri),
+                    prompt_file = await download_blob_to_path(
+                        body.prompt_blob_uri,
+                        downloads_dir / _blob_filename(body.prompt_blob_uri),
                     )
 
-                json_template: Optional[Path] = None
-                if body.run_profile and body.run_profile.json_template_blob_uri:
-                    json_template = await download_blob_to_path(
-                        body.run_profile.json_template_blob_uri,
-                        downloads_dir / _blob_filename(body.run_profile.json_template_blob_uri),
+                    pdf_files: List[Path] = []
+                    for uri in body.cv_blob_uris:
+                        local = await download_blob_to_path(
+                            uri, downloads_dir / _blob_filename(uri)
+                        )
+                        pdf_files.append(local)
+
+                    spec_file: Optional[Path] = None
+                    if body.spec_blob_uri:
+                        spec_file = await download_blob_to_path(
+                            body.spec_blob_uri,
+                            downloads_dir / _blob_filename(body.spec_blob_uri),
+                        )
+
+                    json_template: Optional[Path] = None
+                    if body.run_profile and body.run_profile.json_template_blob_uri:
+                        json_template = await download_blob_to_path(
+                            body.run_profile.json_template_blob_uri,
+                            downloads_dir / _blob_filename(body.run_profile.json_template_blob_uri),
+                        )
+
+                    io_elapsed = elapsed_ms(io_start)
+
+                    # ── Determine PDF / MD file mapping ───────────────────
+                    pdf1 = pdf_files[0] if len(pdf_files) >= 1 else None
+                    pdf2 = pdf_files[1] if len(pdf_files) >= 2 else spec_file
+
+                    md_file: Optional[Path] = None
+                    if spec_file and spec_file.suffix.lower() in (".md", ".txt"):
+                        md_file = spec_file
+                        pdf2 = None  # don't pass as pdf
+
+                    join_mode = body.run_profile.join_mode if body.run_profile else None
+
+                    # ── Run awreason N times ──────────────────────────────
+                    awreason_start = now_ms()
+                    individual_runs = await run_assessment(
+                        run_dir=run_dir,
+                        prompt_file=prompt_file,
+                        pdf_file1=pdf1,
+                        pdf_file2=pdf2,
+                        md_file=md_file,
+                        json_template=json_template,
+                        join_mode=join_mode,
+                        numruns=body.numruns,
                     )
+                    awreason_elapsed = elapsed_ms(awreason_start)
 
-                io_elapsed = elapsed_ms(io_start)
+                    # ── Upload artifacts ──────────────────────────────────
+                    artifacts: List[ArtifactRef] = []
+                    if body.return_artifacts:
+                        artifacts = await _upload_run_artifacts(run_dir, rid)
+                        # Attach artifact URIs to individual runs
+                        for a in artifacts:
+                            for r in individual_runs:
+                                if r.raw_output_path and a.name.endswith(Path(r.raw_output_path).name):
+                                    r.artifacts.append(a)
 
-                # ── Determine PDF / MD file mapping ───────────────────
-                pdf1 = pdf_files[0] if len(pdf_files) >= 1 else None
-                pdf2 = pdf_files[1] if len(pdf_files) >= 2 else spec_file
+                    # ── Aggregate if multi-run ────────────────────────────
+                    aggregation: Optional[AggregationStats] = None
+                    final_score: Optional[float] = None
+                    final_sub_scores: Dict[str, Any] = {}
+                    final_must_haves: List[MustHaveResult] = []
+                    final_comment: Optional[str] = None
 
-                md_file: Optional[Path] = None
-                if spec_file and spec_file.suffix.lower() in (".md", ".txt"):
-                    md_file = spec_file
-                    pdf2 = None  # don't pass as pdf
+                    if body.numruns > 1 and len(individual_runs) >= 2:
+                        aggregation = _aggregate_runs(individual_runs, method="median")
+                        final_score = aggregation.aggregated_score
+                        final_sub_scores = aggregation.sub_score_aggregations
+                        final_must_haves = _aggregate_must_haves(individual_runs)
+                        aggregation.must_have_aggregations = [
+                            mh.model_dump() for mh in final_must_haves
+                        ]
+                        # Use the comment from the first run as representative
+                        final_comment = next((r.comment for r in individual_runs if r.comment), None)
+                    elif individual_runs:
+                        r0 = individual_runs[0]
+                        final_score = r0.overall_score
+                        final_sub_scores = r0.sub_scores
+                        final_must_haves = r0.must_haves
+                        final_comment = r0.comment
 
-                join_mode = body.run_profile.join_mode if body.run_profile else None
+                    # ── Aggregate token usage ─────────────────────────────
+                    total_input = sum(r.token_usage.input for r in individual_runs)
+                    total_output = sum(r.token_usage.output for r in individual_runs)
+                    total_ms = io_elapsed + awreason_elapsed
 
-                # ── Run awreason N times ──────────────────────────────
-                awreason_start = now_ms()
-                individual_runs = await run_assessment(
-                    run_dir=run_dir,
-                    prompt_file=prompt_file,
-                    pdf_file1=pdf1,
-                    pdf_file2=pdf2,
-                    md_file=md_file,
-                    json_template=json_template,
-                    join_mode=join_mode,
-                    numruns=body.numruns,
-                )
-                awreason_elapsed = elapsed_ms(awreason_start)
-
-                # ── Upload artifacts ──────────────────────────────────
-                artifacts: List[ArtifactRef] = []
-                if body.return_artifacts:
-                    artifacts = await _upload_run_artifacts(run_dir, rid)
-                    # Attach artifact URIs to individual runs
-                    for a in artifacts:
-                        for r in individual_runs:
-                            if r.raw_output_path and a.name.endswith(Path(r.raw_output_path).name):
-                                r.artifacts.append(a)
-
-                # ── Aggregate if multi-run ────────────────────────────
-                aggregation: Optional[AggregationStats] = None
-                final_score: Optional[float] = None
-                final_sub_scores: Dict[str, Any] = {}
-                final_must_haves: List[MustHaveResult] = []
-                final_comment: Optional[str] = None
-
-                if body.numruns > 1 and len(individual_runs) >= 2:
-                    aggregation = _aggregate_runs(individual_runs, method="median")
-                    final_score = aggregation.aggregated_score
-                    final_sub_scores = aggregation.sub_score_aggregations
-                    final_must_haves = _aggregate_must_haves(individual_runs)
-                    aggregation.must_have_aggregations = [
-                        mh.model_dump() for mh in final_must_haves
-                    ]
-                    # Use the comment from the first run as representative
-                    final_comment = next((r.comment for r in individual_runs if r.comment), None)
-                elif individual_runs:
-                    r0 = individual_runs[0]
-                    final_score = r0.overall_score
-                    final_sub_scores = r0.sub_scores
-                    final_must_haves = r0.must_haves
-                    final_comment = r0.comment
-
-                # ── Aggregate token usage ─────────────────────────────
-                total_input = sum(r.token_usage.input for r in individual_runs)
-                total_output = sum(r.token_usage.output for r in individual_runs)
-                total_ms = io_elapsed + awreason_elapsed
-
-                return AssessResponse(
-                    run_id=rid,
-                    job_id=body.job_id,
-                    application_id=body.application_id,
-                    overall_score=final_score,
-                    sub_scores=final_sub_scores,
-                    must_haves=final_must_haves,
-                    comment=final_comment,
-                    artifacts=artifacts,
-                    timings_ms=TimingsMs(total=total_ms, awreason=awreason_elapsed, io=io_elapsed),
-                    token_usage=TokenUsage(input=total_input, output=total_output),
-                    correlation_id=cid,
-                    individual_runs=individual_runs,
-                    aggregation=aggregation,
-                )
-        except FileNotFoundError as exc:
-            return _problem(400, "Input not found", str(exc), cid, request.url.path)
-        except Exception as exc:
-            logger.exception("Assessment failed for job=%s", body.job_id)
-            return _problem(500, "Assessment failed", str(exc), cid, request.url.path)
+                    return AssessResponse(
+                        run_id=rid,
+                        job_id=body.job_id,
+                        application_id=body.application_id,
+                        overall_score=final_score,
+                        sub_scores=final_sub_scores,
+                        must_haves=final_must_haves,
+                        comment=final_comment,
+                        artifacts=artifacts,
+                        timings_ms=TimingsMs(total=total_ms, awreason=awreason_elapsed, io=io_elapsed),
+                        token_usage=TokenUsage(input=total_input, output=total_output),
+                        correlation_id=cid,
+                        individual_runs=individual_runs,
+                        aggregation=aggregation,
+                    )
+            except FileNotFoundError as exc:
+                return _problem(400, "Input not found", str(exc), cid, request.url.path)
+            except Exception as exc:
+                logger.exception("Assessment failed for job=%s", body.job_id)
+                return _problem(500, "Assessment failed", str(exc), cid, request.url.path)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -295,119 +344,131 @@ async def assess_upload(
 
     rid = uuid.uuid4().hex
     run_id_var.set(rid)
+    request_id = _resolve_request_id(request=request, correlation_id=cid, run_id=rid)
 
     sem = get_semaphore()
     io_start = now_ms()
 
     async with sem:
-        try:
-            async with new_run_workdir(base=settings.workdir_base, run_id=rid) as run_dir:
-                downloads_dir = run_dir / "downloads"
-                downloads_dir.mkdir()
+        with track_active_request(
+            request_id,
+            metadata={
+                "endpoint": request.url.path,
+                "method": request.method,
+                "runId": rid,
+                "jobId": job_id,
+                "applicationId": application_id,
+                "correlationId": cid,
+            },
+        ):
+            try:
+                async with new_run_workdir(base=settings.workdir_base, run_id=rid) as run_dir:
+                    downloads_dir = run_dir / "downloads"
+                    downloads_dir.mkdir()
 
-                # Save uploaded files
-                local_prompt: Optional[Path] = None
-                if prompt_file:
-                    local_prompt = await _save_upload(prompt_file, downloads_dir)
-                elif "promptBlobUri" in body_dict:
-                    local_prompt = await download_blob_to_path(
-                        body_dict["promptBlobUri"],
-                        downloads_dir / _blob_filename(body_dict["promptBlobUri"]),
+                    # Save uploaded files
+                    local_prompt: Optional[Path] = None
+                    if prompt_file:
+                        local_prompt = await _save_upload(prompt_file, downloads_dir)
+                    elif "promptBlobUri" in body_dict:
+                        local_prompt = await download_blob_to_path(
+                            body_dict["promptBlobUri"],
+                            downloads_dir / _blob_filename(body_dict["promptBlobUri"]),
+                        )
+
+                    if not local_prompt:
+                        return _problem(400, "Missing prompt", "Either upload promptFile or provide promptBlobUri.", cid, request.url.path)
+
+                    pdf_files: List[Path] = []
+                    for uf in cv_files:
+                        if uf.filename and is_allowed_file(uf.filename):
+                            pdf_files.append(await _save_upload(uf, downloads_dir))
+
+                    local_spec: Optional[Path] = None
+                    if spec_file:
+                        local_spec = await _save_upload(spec_file, downloads_dir)
+
+                    io_elapsed = elapsed_ms(io_start)
+
+                    pdf1 = pdf_files[0] if pdf_files else None
+                    pdf2 = pdf_files[1] if len(pdf_files) >= 2 else local_spec
+
+                    md_file: Optional[Path] = None
+                    if local_spec and local_spec.suffix.lower() in (".md", ".txt"):
+                        md_file = local_spec
+                        pdf2 = None
+
+                    join_mode = run_profile.get("joinMode")
+                    json_template: Optional[Path] = None
+                    if "jsonTemplateBlobUri" in run_profile:
+                        json_template = await download_blob_to_path(
+                            run_profile["jsonTemplateBlobUri"],
+                            downloads_dir / _blob_filename(run_profile["jsonTemplateBlobUri"]),
+                        )
+
+                    awreason_start = now_ms()
+                    individual_runs = await run_assessment(
+                        run_dir=run_dir,
+                        prompt_file=local_prompt,
+                        pdf_file1=pdf1,
+                        pdf_file2=pdf2,
+                        md_file=md_file,
+                        json_template=json_template,
+                        join_mode=join_mode,
+                        numruns=numruns,
                     )
+                    awreason_elapsed = elapsed_ms(awreason_start)
 
-                if not local_prompt:
-                    return _problem(400, "Missing prompt", "Either upload promptFile or provide promptBlobUri.", cid, request.url.path)
+                    artifacts: List[ArtifactRef] = []
+                    if return_artifacts:
+                        artifacts = await _upload_run_artifacts(run_dir, rid)
 
-                pdf_files: List[Path] = []
-                for uf in cv_files:
-                    if uf.filename and is_allowed_file(uf.filename):
-                        pdf_files.append(await _save_upload(uf, downloads_dir))
+                    aggregation: Optional[AggregationStats] = None
+                    final_score: Optional[float] = None
+                    final_sub_scores: Dict[str, Any] = {}
+                    final_must_haves: List[MustHaveResult] = []
+                    final_comment: Optional[str] = None
 
-                local_spec: Optional[Path] = None
-                if spec_file:
-                    local_spec = await _save_upload(spec_file, downloads_dir)
+                    if numruns > 1 and len(individual_runs) >= 2:
+                        aggregation = _aggregate_runs(individual_runs, method="median")
+                        final_score = aggregation.aggregated_score
+                        final_sub_scores = aggregation.sub_score_aggregations
+                        final_must_haves = _aggregate_must_haves(individual_runs)
+                        aggregation.must_have_aggregations = [
+                            mh.model_dump() for mh in final_must_haves
+                        ]
+                        final_comment = next((r.comment for r in individual_runs if r.comment), None)
+                    elif individual_runs:
+                        r0 = individual_runs[0]
+                        final_score = r0.overall_score
+                        final_sub_scores = r0.sub_scores
+                        final_must_haves = r0.must_haves
+                        final_comment = r0.comment
 
-                io_elapsed = elapsed_ms(io_start)
+                    total_input = sum(r.token_usage.input for r in individual_runs)
+                    total_output = sum(r.token_usage.output for r in individual_runs)
+                    total_ms = io_elapsed + awreason_elapsed
 
-                pdf1 = pdf_files[0] if pdf_files else None
-                pdf2 = pdf_files[1] if len(pdf_files) >= 2 else local_spec
-
-                md_file: Optional[Path] = None
-                if local_spec and local_spec.suffix.lower() in (".md", ".txt"):
-                    md_file = local_spec
-                    pdf2 = None
-
-                join_mode = run_profile.get("joinMode")
-                json_template: Optional[Path] = None
-                if "jsonTemplateBlobUri" in run_profile:
-                    json_template = await download_blob_to_path(
-                        run_profile["jsonTemplateBlobUri"],
-                        downloads_dir / _blob_filename(run_profile["jsonTemplateBlobUri"]),
+                    return AssessResponse(
+                        runId=rid,
+                        jobId=job_id,
+                        applicationId=application_id,
+                        overallScore=final_score,
+                        subScores=final_sub_scores,
+                        mustHaves=final_must_haves,
+                        comment=final_comment,
+                        artifacts=artifacts,
+                        timingsMs=TimingsMs(total=total_ms, awreason=awreason_elapsed, io=io_elapsed),
+                        tokenUsage=TokenUsage(input=total_input, output=total_output),
+                        correlationId=cid,
+                        individualRuns=individual_runs,
+                        aggregation=aggregation,
                     )
-
-                awreason_start = now_ms()
-                individual_runs = await run_assessment(
-                    run_dir=run_dir,
-                    prompt_file=local_prompt,
-                    pdf_file1=pdf1,
-                    pdf_file2=pdf2,
-                    md_file=md_file,
-                    json_template=json_template,
-                    join_mode=join_mode,
-                    numruns=numruns,
-                )
-                awreason_elapsed = elapsed_ms(awreason_start)
-
-                artifacts: List[ArtifactRef] = []
-                if return_artifacts:
-                    artifacts = await _upload_run_artifacts(run_dir, rid)
-
-                aggregation: Optional[AggregationStats] = None
-                final_score: Optional[float] = None
-                final_sub_scores: Dict[str, Any] = {}
-                final_must_haves: List[MustHaveResult] = []
-                final_comment: Optional[str] = None
-
-                if numruns > 1 and len(individual_runs) >= 2:
-                    aggregation = _aggregate_runs(individual_runs, method="median")
-                    final_score = aggregation.aggregated_score
-                    final_sub_scores = aggregation.sub_score_aggregations
-                    final_must_haves = _aggregate_must_haves(individual_runs)
-                    aggregation.must_have_aggregations = [
-                        mh.model_dump() for mh in final_must_haves
-                    ]
-                    final_comment = next((r.comment for r in individual_runs if r.comment), None)
-                elif individual_runs:
-                    r0 = individual_runs[0]
-                    final_score = r0.overall_score
-                    final_sub_scores = r0.sub_scores
-                    final_must_haves = r0.must_haves
-                    final_comment = r0.comment
-
-                total_input = sum(r.token_usage.input for r in individual_runs)
-                total_output = sum(r.token_usage.output for r in individual_runs)
-                total_ms = io_elapsed + awreason_elapsed
-
-                return AssessResponse(
-                    runId=rid,
-                    jobId=job_id,
-                    applicationId=application_id,
-                    overallScore=final_score,
-                    subScores=final_sub_scores,
-                    mustHaves=final_must_haves,
-                    comment=final_comment,
-                    artifacts=artifacts,
-                    timingsMs=TimingsMs(total=total_ms, awreason=awreason_elapsed, io=io_elapsed),
-                    tokenUsage=TokenUsage(input=total_input, output=total_output),
-                    correlationId=cid,
-                    individualRuns=individual_runs,
-                    aggregation=aggregation,
-                )
-        except Exception as exc:
-            import traceback
-            tb = traceback.format_exc()
-            logger.exception("Assessment (upload) failed for job=%s", job_id)
-            return _problem(500, "Assessment failed", f"{type(exc).__name__}: {exc}\n{tb}", cid, request.url.path)
+            except Exception as exc:
+                import traceback
+                tb = traceback.format_exc()
+                logger.exception("Assessment (upload) failed for job=%s", job_id)
+                return _problem(500, "Assessment failed", f"{type(exc).__name__}: {exc}\n{tb}", cid, request.url.path)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -451,6 +512,11 @@ async def assess_passthrough(
                                      description="Total number of runs in the batch."),
     aggregation_method: Optional[str] = Form(default=None, alias="aggregationMethod",
                                              description="Aggregation method (median, mean, trimmed_mean, etc.)."),
+    aggregation_profile: str = Form(
+        default=AGGREGATION_PROFILE_GENERIC,
+        alias="aggregationProfile",
+        description="Aggregation profile: generic_passthrough (default) or cv_scoring_v1.",
+    ),
     cid: str = Depends(set_correlation_id),
 ):
     """Run awreason.py exactly as the direct subprocess does and return the
@@ -472,184 +538,209 @@ async def assess_passthrough(
     correlation_id_var.set(cid)
     rid = uuid.uuid4().hex
     run_id_var.set(rid)
+    request_id = _resolve_request_id(request=request, correlation_id=cid, run_id=rid)
 
     sem = get_semaphore()
 
     async with sem:
-        try:
-            async with new_run_workdir(base=settings.workdir_base, run_id=rid) as run_dir:
-                downloads_dir = run_dir / "downloads"
-                downloads_dir.mkdir()
+        with track_active_request(
+            request_id,
+            metadata={
+                "endpoint": request.url.path,
+                "method": request.method,
+                "runId": rid,
+                "jobId": batch_id or "",
+                "applicationId": "",
+                "correlationId": cid,
+            },
+        ):
+            try:
+                async with new_run_workdir(base=settings.workdir_base, run_id=rid) as run_dir:
+                    downloads_dir = run_dir / "downloads"
+                    downloads_dir.mkdir()
 
-                # Save uploaded files
-                local_prompt = await _save_upload(prompt_file, downloads_dir)
-                prompt_for_run = local_prompt
+                    # Save uploaded files
+                    local_prompt = await _save_upload(prompt_file, downloads_dir)
+                    prompt_for_run = local_prompt
 
-                pdf_files: List[Path] = []
-                image_files: List[Path] = []
-                markdown_cv_files: List[Path] = []
-                for uf in cv_files:
-                    if uf.filename:
-                        if not is_allowed_file(uf.filename):
-                            return _problem(
-                                400,
-                                "Invalid cvFiles input",
-                                f"Unsupported file type for cvFiles[]: {uf.filename}",
-                                cid,
-                                request.url.path,
-                            )
-                        saved = await _save_upload(uf, downloads_dir)
-                        suffix = saved.suffix.lower()
-                        if suffix in _IMAGE_SUFFIXES:
-                            image_files.append(saved)
-                        elif suffix in _PDF_SUFFIXES:
-                            pdf_files.append(saved)
-                        elif suffix in _MARKDOWN_SUFFIXES:
-                            markdown_cv_files.append(saved)
-                        else:
-                            return _problem(
-                                400,
-                                "Invalid cvFiles input",
-                                f"Unsupported file type for cvFiles[]: {uf.filename}",
-                                cid,
-                                request.url.path,
-                            )
+                    pdf_files: List[Path] = []
+                    image_files: List[Path] = []
+                    markdown_cv_files: List[Path] = []
+                    for uf in cv_files:
+                        if uf.filename:
+                            if not is_allowed_file(uf.filename):
+                                return _problem(
+                                    400,
+                                    "Invalid cvFiles input",
+                                    f"Unsupported file type for cvFiles[]: {uf.filename}",
+                                    cid,
+                                    request.url.path,
+                                )
+                            saved = await _save_upload(uf, downloads_dir)
+                            suffix = saved.suffix.lower()
+                            if suffix in _IMAGE_SUFFIXES:
+                                image_files.append(saved)
+                            elif suffix in _PDF_SUFFIXES:
+                                pdf_files.append(saved)
+                            elif suffix in _MARKDOWN_SUFFIXES:
+                                markdown_cv_files.append(saved)
+                            else:
+                                return _problem(
+                                    400,
+                                    "Invalid cvFiles input",
+                                    f"Unsupported file type for cvFiles[]: {uf.filename}",
+                                    cid,
+                                    request.url.path,
+                                )
 
-                local_spec: Optional[Path] = None
-                if spec_file:
-                    local_spec = await _save_upload(spec_file, downloads_dir)
+                    local_spec: Optional[Path] = None
+                    if spec_file:
+                        local_spec = await _save_upload(spec_file, downloads_dir)
 
-                local_json_template: Optional[Path] = None
-                if json_template:
-                    local_json_template = await _save_upload(json_template, downloads_dir)
+                    local_json_template: Optional[Path] = None
+                    if json_template:
+                        local_json_template = await _save_upload(json_template, downloads_dir)
 
-                # Map files to awreason CLI args (same logic as the UX)
-                pdf1 = pdf_files[0] if pdf_files else None
-                pdf2 = pdf_files[1] if len(pdf_files) >= 2 else None
+                    # Map files to awreason CLI args (same logic as the UX)
+                    pdf1 = pdf_files[0] if pdf_files else None
+                    pdf2 = pdf_files[1] if len(pdf_files) >= 2 else None
 
-                md_file: Optional[Path] = None
-                markdown_sources: List[Path] = []
-                if local_spec and local_spec.suffix.lower() in _MARKDOWN_SUFFIXES:
-                    markdown_sources.append(local_spec)
-                elif local_spec:
-                    # Spec is a PDF — use as pdf2 if slot is free
-                    if pdf2 is None:
-                        pdf2 = local_spec
+                    md_file: Optional[Path] = None
+                    markdown_sources: List[Path] = []
+                    if local_spec and local_spec.suffix.lower() in _MARKDOWN_SUFFIXES:
+                        markdown_sources.append(local_spec)
+                    elif local_spec:
+                        # Spec is a PDF — use as pdf2 if slot is free
+                        if pdf2 is None:
+                            pdf2 = local_spec
 
-                markdown_sources.extend(markdown_cv_files)
+                    markdown_sources.extend(markdown_cv_files)
 
-                if markdown_cv_files:
-                    prompt_for_run = _merge_prompt_and_context(
-                        prompt_file=local_prompt,
-                        sources=markdown_sources,
-                        output_path=downloads_dir / "merged-prompt.md",
-                    )
-                elif markdown_sources:
-                    md_file = _merge_markdown_sources(
-                        sources=markdown_sources,
-                        output_path=downloads_dir / "merged-context.md",
-                    )
+                    if markdown_cv_files:
+                        prompt_for_run = _merge_prompt_and_context(
+                            prompt_file=local_prompt,
+                            sources=markdown_sources,
+                            output_path=downloads_dir / "merged-prompt.md",
+                        )
+                    elif markdown_sources:
+                        md_file = _merge_markdown_sources(
+                            sources=markdown_sources,
+                            output_path=downloads_dir / "merged-context.md",
+                        )
 
-                # If images were uploaded, put them in a folder
-                images_folder: Optional[Path] = None
-                if image_files:
-                    img_dir = downloads_dir / "images"
-                    img_dir.mkdir(exist_ok=True)
-                    for img in image_files:
-                        img.rename(img_dir / img.name)
-                    images_folder = img_dir
+                    # If images were uploaded, put them in a folder
+                    images_folder: Optional[Path] = None
+                    if image_files:
+                        img_dir = downloads_dir / "images"
+                        img_dir.mkdir(exist_ok=True)
+                        for img in image_files:
+                            img.rename(img_dir / img.name)
+                        images_folder = img_dir
 
-                # Validate join_mode
-                if join_mode and join_mode not in ("horizontal", "vertical"):
-                    return _problem(400, "Invalid joinMode",
-                                    f"joinMode must be 'horizontal' or 'vertical', got '{join_mode}'",
-                                    cid, request.url.path)
+                    # Validate join_mode
+                    if join_mode and join_mode not in ("horizontal", "vertical"):
+                        return _problem(400, "Invalid joinMode",
+                                        f"joinMode must be 'horizontal' or 'vertical', got '{join_mode}'",
+                                        cid, request.url.path)
 
-                if reasoning_effort not in ("low", "medium", "high"):
-                    return _problem(400, "Invalid reasoningEffort",
-                                    f"reasoningEffort must be 'low', 'medium', or 'high', got '{reasoning_effort}'",
-                                    cid, request.url.path)
+                    if reasoning_effort not in ("low", "medium", "high"):
+                        return _problem(400, "Invalid reasoningEffort",
+                                        f"reasoningEffort must be 'low', 'medium', or 'high', got '{reasoning_effort}'",
+                                        cid, request.url.path)
 
-                # Run awreason as passthrough
-                result = await run_passthrough(
-                    run_dir=run_dir,
-                    prompt_file=prompt_for_run,
-                    pdf_file1=pdf1,
-                    pdf_file2=pdf2,
-                    md_file=md_file,
-                    json_template=local_json_template,
-                    join_mode=join_mode,
-                    reasoning_effort=reasoning_effort,
-                    images_folder1=images_folder,
-                )
+                    try:
+                        aggregation_profile = _validate_aggregation_profile(aggregation_profile)
+                    except ValueError as exc:
+                        return _problem(
+                            400,
+                            "Invalid aggregation profile",
+                            str(exc),
+                            cid,
+                            request.url.path,
+                        )
 
-                file_bytes = result["file_bytes"]
-                exit_code = result["exit_code"]
-
-                # If no output was produced and the process failed, return an error
-                if not file_bytes and exit_code != 0:
-                    detail = result["stderr"] or result["stdout"] or "No output produced"
-                    return _problem(
-                        500, "Assessment failed",
-                        f"awreason.py exited with code {exit_code}.\n{detail}",
-                        cid, request.url.path,
-                    )
-
-                # ── Persist artifacts to blob (when configured) ───────
-                artifact_uris: List[str] = []
-                run_artifacts = await _upload_run_artifacts(
-                    run_dir, rid,
-                    batch_id=batch_id,
-                    run_number=run_number,
-                )
-                artifact_uris = [a.blob_uri for a in run_artifacts]
-
-                # ── Server-side aggregation on the last batch run ─────
-                aggregation_uri: Optional[str] = None
-                if (
-                    batch_id
-                    and run_number is not None
-                    and total_runs is not None
-                    and total_runs > 1
-                    and run_number == total_runs
-                    and settings.blob_account_url
-                ):
-                    aggregation_uri = await _run_batch_aggregation(
-                        batch_id=batch_id,
-                        total_runs=total_runs,
-                        method=aggregation_method or "median",
+                    # Run awreason as passthrough
+                    result = await run_passthrough(
                         run_dir=run_dir,
+                        prompt_file=prompt_for_run,
+                        pdf_file1=pdf1,
+                        pdf_file2=pdf2,
+                        md_file=md_file,
+                        json_template=local_json_template,
+                        join_mode=join_mode,
+                        reasoning_effort=reasoning_effort,
+                        images_folder1=images_folder,
                     )
 
-                # Return the file content directly with metadata headers
-                output_filename = result["output_filename"] or "assessment-output.html"
-                headers = {
-                    "X-AWR-Exit-Code": str(exit_code),
-                    "X-AWR-Duration-Ms": str(result["duration_ms"]),
-                    "X-AWR-Output-Filename": output_filename,
-                    "X-AWR-Run-Id": rid,
-                    "X-Correlation-Id": cid,
-                    "Content-Disposition": f'attachment; filename="{output_filename}"',
-                    "Access-Control-Expose-Headers": "X-AWR-Exit-Code, X-AWR-Duration-Ms, X-AWR-Output-Filename, X-AWR-Run-Id, X-AWR-Batch-Id, X-Correlation-Id, X-AWR-Artifact-URIs, X-AWR-Aggregation-URI, Content-Disposition",
-                }
-                if batch_id:
-                    headers["X-AWR-Batch-Id"] = batch_id
-                if artifact_uris:
-                    headers["X-AWR-Artifact-URIs"] = ",".join(artifact_uris)
-                if aggregation_uri:
-                    headers["X-AWR-Aggregation-URI"] = aggregation_uri
+                    file_bytes = result["file_bytes"]
+                    exit_code = result["exit_code"]
 
-                return Response(
-                    content=file_bytes,
-                    media_type=result["content_type"],
-                    headers=headers,
-                )
+                    # If no output was produced and the process failed, return an error
+                    if not file_bytes and exit_code != 0:
+                        detail = result["stderr"] or result["stdout"] or "No output produced"
+                        return _problem(
+                            500, "Assessment failed",
+                            f"awreason.py exited with code {exit_code}.\n{detail}",
+                            cid, request.url.path,
+                        )
 
-        except Exception as exc:
-            import traceback
-            tb = traceback.format_exc()
-            logger.exception("Assessment (passthrough) failed")
-            return _problem(500, "Assessment failed", f"{type(exc).__name__}: {exc}\n{tb}", cid, request.url.path)
+                    # ── Persist artifacts to blob (when configured) ───────
+                    artifact_uris: List[str] = []
+                    run_artifacts = await _upload_run_artifacts(
+                        run_dir, rid,
+                        batch_id=batch_id,
+                        run_number=run_number,
+                    )
+                    artifact_uris = [a.blob_uri for a in run_artifacts]
+
+                    # ── Server-side aggregation on the last batch run ─────
+                    aggregation_uri: Optional[str] = None
+                    if (
+                        batch_id
+                        and run_number is not None
+                        and total_runs is not None
+                        and total_runs > 1
+                        and run_number == total_runs
+                        and settings.blob_account_url
+                    ):
+                        aggregation_uri = await _run_batch_aggregation(
+                            batch_id=batch_id,
+                            total_runs=total_runs,
+                            method=aggregation_method or "median",
+                            aggregation_profile=aggregation_profile,
+                            run_dir=run_dir,
+                        )
+
+                    # Return the file content directly with metadata headers
+                    output_filename = result["output_filename"] or "assessment-output.html"
+                    headers = {
+                        "X-AWR-Exit-Code": str(exit_code),
+                        "X-AWR-Duration-Ms": str(result["duration_ms"]),
+                        "X-AWR-Output-Filename": output_filename,
+                        "X-AWR-Run-Id": rid,
+                        "X-Correlation-Id": cid,
+                        "Content-Disposition": f'attachment; filename="{output_filename}"',
+                        "Access-Control-Expose-Headers": "X-AWR-Exit-Code, X-AWR-Duration-Ms, X-AWR-Output-Filename, X-AWR-Run-Id, X-AWR-Batch-Id, X-Correlation-Id, X-AWR-Artifact-URIs, X-AWR-Aggregation-URI, X-AWR-Aggregation-Profile, Content-Disposition",
+                    }
+                    if batch_id:
+                        headers["X-AWR-Batch-Id"] = batch_id
+                    if artifact_uris:
+                        headers["X-AWR-Artifact-URIs"] = ",".join(artifact_uris)
+                    if aggregation_uri:
+                        headers["X-AWR-Aggregation-URI"] = aggregation_uri
+                    headers["X-AWR-Aggregation-Profile"] = aggregation_profile
+
+                    return Response(
+                        content=file_bytes,
+                        media_type=result["content_type"],
+                        headers=headers,
+                    )
+
+            except Exception as exc:
+                import traceback
+                tb = traceback.format_exc()
+                logger.exception("Assessment (passthrough) failed")
+                return _problem(500, "Assessment failed", f"{type(exc).__name__}: {exc}\n{tb}", cid, request.url.path)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -680,63 +771,79 @@ async def aggregate_runs(
         run_data: List[Dict[str, Any]] = []
         rid = uuid.uuid4().hex
         run_id_var.set(rid)
+        request_id = _resolve_request_id(request=request, correlation_id=cid, run_id=rid)
 
-        async with new_run_workdir(base=settings.workdir_base, run_id=rid) as run_dir:
-            dl_dir = run_dir / "downloads"
-            dl_dir.mkdir()
+        with track_active_request(
+            request_id,
+            metadata={
+                "endpoint": request.url.path,
+                "method": request.method,
+                "runId": rid,
+                "jobId": body.job_id,
+                "applicationId": body.application_id,
+                "correlationId": cid,
+            },
+        ):
+            async with new_run_workdir(base=settings.workdir_base, run_id=rid) as run_dir:
+                dl_dir = run_dir / "downloads"
+                dl_dir.mkdir()
 
-            for idx, ref in enumerate(body.runs):
-                if ref.inline:
-                    run_data.append(ref.inline)
-                elif ref.blob_uri:
-                    dest = dl_dir / f"run_{idx}.json"
-                    await download_blob_to_path(ref.blob_uri, dest)
-                    content = dest.read_text(encoding="utf-8")
-                    try:
-                        run_data.append(json.loads(content))
-                    except json.JSONDecodeError:
-                        run_data.append({"raw": content})
-                else:
+                for idx, ref in enumerate(body.runs):
+                    if ref.inline:
+                        run_data.append(ref.inline)
+                    elif ref.blob_uri:
+                        dest = dl_dir / f"run_{idx}.json"
+                        await download_blob_to_path(ref.blob_uri, dest)
+                        content = dest.read_text(encoding="utf-8")
+                        try:
+                            run_data.append(json.loads(content))
+                        except json.JSONDecodeError:
+                            run_data.append({"raw": content})
+                    else:
+                        return _problem(
+                            400, "Invalid run reference",
+                            f"Run at index {idx} has neither blobUri nor inline data.",
+                            cid, request.url.path,
+                        )
+
+                method = body.strategy.type
+                try:
+                    profile = _validate_aggregation_profile(body.strategy.profile)
+                except ValueError as exc:
                     return _problem(
-                        400, "Invalid run reference",
-                        f"Run at index {idx} has neither blobUri nor inline data.",
-                        cid, request.url.path,
+                        400,
+                        "Invalid aggregation profile",
+                        str(exc),
+                        cid,
+                        request.url.path,
                     )
 
-            # Build pseudo-SingleRunResults for aggregation
-            pseudo_runs: List[SingleRunResult] = []
-            from app.awreason_runner import _extract_overall_score, _extract_sub_scores, _extract_must_haves
-
-            for i, d in enumerate(run_data):
-                pseudo_runs.append(SingleRunResult(
-                    run_number=i + 1,
-                    overall_score=_extract_overall_score(d),
-                    sub_scores=_extract_sub_scores(d),
-                    must_haves=_extract_must_haves(d),
-                ))
-
-            method = body.strategy.type
-            if method == "trimmed_mean":
-                agg = _aggregate_runs(pseudo_runs, method="trimmed_mean", trim_pct=body.strategy.trim_percent)
-            else:
-                agg = _aggregate_runs(pseudo_runs, method=method)
-
-            must_haves = _aggregate_must_haves(pseudo_runs)
-            agg.must_have_aggregations = [mh.model_dump() for mh in must_haves]
-
-            # Optionally upload aggregation result and all artifacts
-            artifacts: List[ArtifactRef] = []
-            if settings.blob_account_url:
-                # Save aggregation result into the results dir for unified upload
-                results_dir = run_dir / "results"
-                results_dir.mkdir(exist_ok=True)
-                agg_file = results_dir / "aggregated_result.json"
-                agg_file.write_text(
-                    json.dumps(agg.model_dump(by_alias=True), indent=2, default=str),
-                    encoding="utf-8",
+                agg, must_haves = _aggregate_payloads_for_profile(
+                    run_data=run_data,
+                    method=method,
+                    trim_percent=body.strategy.trim_percent,
+                    profile=profile,
                 )
-                # Upload everything: individual run downloads + aggregation result
-                artifacts = await _upload_run_artifacts(run_dir, rid)
+                agg.profile = profile
+
+                # Preserve generic passthrough behavior by only attaching must-have
+                # consensus for cv-specific profile.
+                if profile == AGGREGATION_PROFILE_CV:
+                    agg.must_have_aggregations = [mh.model_dump() for mh in must_haves]
+
+                # Optionally upload aggregation result and all artifacts
+                artifacts: List[ArtifactRef] = []
+                if settings.blob_account_url:
+                    # Save aggregation result into the results dir for unified upload
+                    results_dir = run_dir / "results"
+                    results_dir.mkdir(exist_ok=True)
+                    agg_file = results_dir / "aggregated_result.json"
+                    agg_file.write_text(
+                        json.dumps(agg.model_dump(by_alias=True), indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                    # Upload everything: individual run downloads + aggregation result
+                    artifacts = await _upload_run_artifacts(run_dir, rid)
 
         return AggregateRunsResponse(
             job_id=body.job_id,
@@ -760,6 +867,21 @@ async def aggregate_runs(
 def _blob_filename(uri: str) -> str:
     """Extract the last path segment from a blob URI as a filename."""
     return uri.rstrip("/").rsplit("/", 1)[-1] or "download"
+
+
+def _resolve_request_id(*, request: Request, correlation_id: str, run_id: str) -> str:
+    """Choose request ID for status tracking.
+
+    Priority:
+      1. ``X-Request-ID`` from caller.
+      2. Correlation ID (caller-provided or generated).
+      3. Server run ID fallback.
+    """
+    return (
+        request.headers.get("X-Request-ID")
+        or correlation_id
+        or run_id
+    )
 
 
 def _read_markdown_source(source: Path) -> str:
@@ -832,6 +954,103 @@ async def _save_upload(upload: UploadFile, dest_dir: Path) -> Path:
     dest.write_bytes(content)
     logger.info("Saved upload %s (%d bytes)", fname, len(content))
     return dest
+
+
+def _validate_aggregation_profile(profile: Optional[str]) -> str:
+    """Validate and normalize aggregation profile selection."""
+    normalized = (profile or AGGREGATION_PROFILE_GENERIC).strip().lower()
+    if normalized not in _ALLOWED_AGGREGATION_PROFILES:
+        supported = ", ".join(sorted(_ALLOWED_AGGREGATION_PROFILES))
+        raise ValueError(f"Unsupported profile '{profile}'. Supported profiles: {supported}")
+    return normalized
+
+
+def _extract_first_json_object(raw_content: str) -> Optional[Dict[str, Any]]:
+    """Return the first JSON object found in a mixed-content string."""
+    try:
+        parsed = json.loads(raw_content)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    brace_start = raw_content.find("{")
+    if brace_start == -1:
+        return None
+
+    depth = 0
+    end = -1
+    for idx in range(brace_start, len(raw_content)):
+        ch = raw_content[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx
+                break
+
+    if end == -1:
+        return None
+
+    try:
+        extracted = json.loads(raw_content[brace_start : end + 1])
+        return extracted if isinstance(extracted, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _coerce_payload_dict(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize run payloads into a JSON dictionary when possible."""
+    if not isinstance(payload, dict):
+        return {}
+
+    raw_value = payload.get("raw")
+    if isinstance(raw_value, str):
+        parsed = _extract_first_json_object(raw_value)
+        if parsed is not None:
+            return parsed
+
+    return payload
+
+
+def _aggregate_payloads_for_profile(
+    *,
+    run_data: List[Dict[str, Any]],
+    method: str,
+    trim_percent: float,
+    profile: str,
+) -> tuple[AggregationStats, List[MustHaveResult]]:
+    """Aggregate run payloads according to the selected profile.
+
+    Generic profile keeps scoring path-based and avoids cv-only consensus fields.
+    CV profile includes must-have consensus for domain-specific consumers.
+    """
+    from app.awreason_runner import _extract_must_haves, _extract_overall_score, _extract_sub_scores
+
+    pseudo_runs: List[SingleRunResult] = []
+    for i, payload in enumerate(run_data):
+        parsed_payload = _coerce_payload_dict(payload)
+        pseudo_runs.append(
+            SingleRunResult(
+                run_number=i + 1,
+                overall_score=_extract_overall_score(parsed_payload),
+                sub_scores=_extract_sub_scores(parsed_payload),
+                must_haves=_extract_must_haves(parsed_payload),
+            )
+        )
+
+    if method == "trimmed_mean":
+        agg = _aggregate_runs(pseudo_runs, method="trimmed_mean", trim_pct=trim_percent)
+    else:
+        agg = _aggregate_runs(pseudo_runs, method=method)
+
+    if profile == AGGREGATION_PROFILE_CV:
+        must_haves = _aggregate_must_haves(pseudo_runs)
+    else:
+        must_haves = []
+
+    return agg, must_haves
 
 
 async def _upload_run_artifacts(
@@ -928,34 +1147,19 @@ async def _run_batch_aggregation(
     batch_id: str,
     total_runs: int,
     method: str,
+    aggregation_profile: str,
     run_dir: Path,
 ) -> Optional[str]:
     """Download all run results from blob, aggregate, upload the result.
 
     Called on the last run of a batch (``run_number == total_runs``).
-    Re-uses :func:`aggregate_multiple_runs` from ``o1-assessment/aggregate_scores.py``.
+    ``generic_passthrough`` re-uses ``aggregate_multiple_runs`` from
+    ``o1-assessment/aggregate_scores.py``. ``cv_scoring_v1`` uses this
+    service's cv-aware aggregation helpers.
 
     Returns the blob URI of the aggregated result, or ``None`` on failure.
     """
     import sys
-
-    # Make aggregate_scores importable
-    resolved = Path(__file__).resolve()
-    # Local dev: wrappers/http-service/app → repo root (parents[3])
-    # Docker:    /app/app/ → /app (parents[1])
-    if len(resolved.parents) > 3:
-        repo_root = resolved.parents[3]
-    else:
-        repo_root = resolved.parents[1]
-    o1_dir = repo_root / "o1-assessment"
-    if str(o1_dir) not in sys.path:
-        sys.path.insert(0, str(o1_dir))
-
-    try:
-        from aggregate_scores import aggregate_multiple_runs
-    except ImportError as exc:
-        logger.warning("Cannot import aggregate_scores – skipping aggregation: %s", exc)
-        return None
 
     try:
         container = settings.blob_container_results
@@ -970,6 +1174,7 @@ async def _run_batch_aggregation(
         agg_tmp.mkdir(exist_ok=True)
 
         downloaded_files: List[Path] = []
+        run_payloads: List[Dict[str, Any]] = []
         for run_num in range(1, total_runs + 1):
             run_prefix = f"{base_prefix}/runs/run{run_num}/"
             blobs = list(cc.list_blobs(name_starts_with=run_prefix))
@@ -982,6 +1187,12 @@ async def _run_batch_aggregation(
                 downloaded_files.append(local_dest)
                 logger.info("Downloaded for aggregation: %s → %s", blob.name, local_dest.name)
 
+                if blob.name.lower().endswith(".json"):
+                    raw_text = local_dest.read_text(encoding="utf-8", errors="replace")
+                    parsed = _extract_first_json_object(raw_text)
+                    if parsed is not None:
+                        run_payloads.append(parsed)
+
         if len(downloaded_files) < 2:
             logger.warning(
                 "Only %d result files found for batch %s – need ≥2 for aggregation",
@@ -989,26 +1200,70 @@ async def _run_batch_aggregation(
             )
             return None
 
-        # Run aggregation
-        agg_result = aggregate_multiple_runs(downloaded_files, method=method)
+        if aggregation_profile == AGGREGATION_PROFILE_GENERIC:
+            # Make aggregate_scores importable only for generic passthrough mode.
+            resolved = Path(__file__).resolve()
+            if len(resolved.parents) > 3:
+                repo_root = resolved.parents[3]
+            else:
+                repo_root = resolved.parents[1]
+            o1_dir = repo_root / "o1-assessment"
+            if str(o1_dir) not in sys.path:
+                sys.path.insert(0, str(o1_dir))
 
-        if "error" in agg_result:
-            logger.warning("Aggregation returned error: %s", agg_result["error"])
-            return None
+            try:
+                from aggregate_scores import aggregate_multiple_runs
+            except ImportError as exc:
+                logger.warning("Cannot import aggregate_scores – skipping aggregation: %s", exc)
+                return None
 
-        # Serialize the aggregated result
-        agg_type = agg_result.get("type", "json")
-        if agg_type == "json":
-            agg_content = json.dumps(
-                agg_result.get("aggregated_result", agg_result),
-                indent=2,
-                default=str,
-            ).encode("utf-8")
-            agg_filename = "aggregated_result.json"
+            agg_result = aggregate_multiple_runs(downloaded_files, method=method)
+
+            if "error" in agg_result:
+                logger.warning("Aggregation returned error: %s", agg_result["error"])
+                return None
+
+            agg_type = agg_result.get("type", "json")
+            if agg_type == "json":
+                agg_content = json.dumps(
+                    agg_result.get("aggregated_result", agg_result),
+                    indent=2,
+                    default=str,
+                ).encode("utf-8")
+                agg_filename = "aggregated_result.json"
+            else:
+                agg_content = json.dumps(agg_result, indent=2, default=str).encode("utf-8")
+                agg_filename = "aggregated_result.json"
+
+            variance = agg_result.get("variance_analysis")
         else:
-            # HTML aggregation — store whatever the aggregator produced
-            agg_content = json.dumps(agg_result, indent=2, default=str).encode("utf-8")
+            # CV-specific profile uses the same extraction + aggregation path as
+            # /aggregate-runs, then emits a domain envelope while keeping blob path stable.
+            if len(run_payloads) < 2:
+                logger.warning(
+                    "Only %d parseable JSON payloads found for batch %s – need ≥2 for cv profile",
+                    len(run_payloads), batch_id,
+                )
+                return None
+
+            agg_stats, must_haves = _aggregate_payloads_for_profile(
+                run_data=run_payloads,
+                method=method,
+                trim_percent=10.0,
+                profile=AGGREGATION_PROFILE_CV,
+            )
+            agg_stats.profile = AGGREGATION_PROFILE_CV
+            agg_stats.must_have_aggregations = [mh.model_dump() for mh in must_haves]
+
+            cv_result = {
+                "profile": AGGREGATION_PROFILE_CV,
+                "method": method,
+                "run_count": len(run_payloads),
+                "aggregation": agg_stats.model_dump(by_alias=True),
+            }
+            agg_content = json.dumps(cv_result, indent=2, default=str).encode("utf-8")
             agg_filename = "aggregated_result.json"
+            variance = None
 
         # Upload to blob
         blob_path = f"{base_prefix}/aggregated/{agg_filename}"
@@ -1016,7 +1271,6 @@ async def _run_batch_aggregation(
         logger.info("Batch aggregation uploaded → %s", uri)
 
         # Also upload variance analysis if present
-        variance = agg_result.get("variance_analysis")
         if variance:
             var_bytes = json.dumps(variance, indent=2, default=str).encode("utf-8")
             var_blob = f"{base_prefix}/aggregated/variance_analysis.json"

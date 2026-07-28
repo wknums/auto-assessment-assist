@@ -37,6 +37,9 @@ class JSONFormatter(logging.Formatter):
             "correlationId": correlation_id_var.get(""),
             "runId": run_id_var.get(""),
         }
+        telemetry = getattr(record, "telemetry", None)
+        if isinstance(telemetry, dict):
+            entry.update(telemetry)
         if record.exc_info and record.exc_info[1]:
             entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(entry, default=str)

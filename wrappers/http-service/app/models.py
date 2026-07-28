@@ -9,6 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field
 import uuid
 
 
+AGGREGATION_PROFILE_GENERIC = "generic_passthrough"
+AGGREGATION_PROFILE_CV = "cv_scoring_v1"
+AGGREGATION_PROFILE_PATTERN = "^(generic_passthrough|cv_scoring_v1)$"
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  POST /assess – request models
 # ══════════════════════════════════════════════════════════════════════
@@ -95,6 +100,7 @@ class SingleRunResult(BaseModel):
 class AggregationStats(BaseModel):
     """Statistics produced when numruns > 1."""
     method: str = "median"
+    profile: str = AGGREGATION_PROFILE_GENERIC
     run_count: int = 0
     aggregated_score: Optional[float] = Field(None, alias="aggregatedScore")
     mean: Optional[float] = None
@@ -146,6 +152,11 @@ class AggregationStrategy(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     type: str = "median"
+    profile: str = Field(
+        AGGREGATION_PROFILE_GENERIC,
+        pattern=AGGREGATION_PROFILE_PATTERN,
+        description="Aggregation profile: generic passthrough or cv-scoring-specific.",
+    )
     trim_percent: float = Field(10.0, alias="trimPercent")
 
 
@@ -169,6 +180,30 @@ class AggregateRunsResponse(BaseModel):
     correlation_id: str = Field("", alias="correlationId")
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class RequestStatusResponse(BaseModel):
+    """Status payload for a tracked request."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    request_id: str = Field("", alias="requestId")
+    active: bool = False
+    status: str = "not_processing"
+    endpoint: str = ""
+    method: str = ""
+    run_id: str = Field("", alias="runId")
+    job_id: str = Field("", alias="jobId")
+    application_id: str = Field("", alias="applicationId")
+    correlation_id: str = Field("", alias="correlationId")
+    started_at_epoch_ms: Optional[int] = Field(None, alias="startedAtEpochMs")
+
+
+class ActiveRequestsResponse(BaseModel):
+    """Collection of currently processing requests."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    active_count: int = Field(0, alias="activeCount")
+    requests: List[RequestStatusResponse] = Field(default_factory=list)
 
 
 # ══════════════════════════════════════════════════════════════════════

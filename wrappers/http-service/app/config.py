@@ -24,7 +24,10 @@ class Settings(BaseSettings):
     workdir_base: str = Field("/work", alias="WORKDIR_BASE")
 
     # ── Concurrency ───────────────────────────────────────────────────
-    per_replica_concurrency: int = Field(1, alias="PER_REPLICA_CONCURRENCY")
+    per_replica_concurrency: int = Field(4, alias="PER_REPLICA_CONCURRENCY")
+
+    # ── Request status tracking ───────────────────────────────────────
+    active_request_ids_dir: str = Field("", alias="ACTIVE_REQUEST_IDS_DIR")
 
     # ── Azure Blob Storage (MI-based auth – no SAS) ───────────────────
     az_storage_name: str = Field("", alias="AZ_STORAGE_NAME")
@@ -62,6 +65,10 @@ class Settings(BaseSettings):
     api_key: str = Field("", alias="API_KEY")
     aad_issuer: str = Field("", alias="AAD_ISSUER")
     aad_audience: str = Field("", alias="AAD_AUDIENCE")
+    aad_required_scope: str = Field("access_as_user", alias="AAD_REQUIRED_SCOPE")
+    aad_required_app_role: str = Field(
+        "TalentMatch.Access", alias="AAD_REQUIRED_APP_ROLE"
+    )
 
     # ── Awreason runner ───────────────────────────────────────────────
     awreason_cli_cmd: str = Field("awreason.py", alias="AWREASON_CLI_CMD")

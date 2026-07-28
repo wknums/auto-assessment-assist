@@ -21,6 +21,7 @@ import logging
 import os
 import signal
 import sys
+from datetime import datetime, timezone
 from typing import Any
 
 from contracts.models import FinishRunRequest, RunMessage, RunResultMessage
@@ -61,8 +62,12 @@ def _coerce_str(v: Any) -> str:
 #  Process a single message
 # ══════════════════════════════════════════════════════════════════════
 
-async def _process_message(raw_body: str, traceparent: str = "") -> None:
-    """Deserialise, check idempotency, execute, and report."""
+async def _process_message(raw_body: str, traceparent: str = "") -> RunResultMessage | None:
+    """Deserialise, check idempotency, execute, and report.
+
+    Returns the ``RunResultMessage`` produced (or replayed) for this message,
+    or ``None`` when no result was emitted (e.g. validation failure).
+    """
     from engine_core.runner import execute_run
 
     # Lazy imports – avoid circular / module-name issues
@@ -72,6 +77,8 @@ async def _process_message(raw_body: str, traceparent: str = "") -> None:
     _sbio        = import_module("wrappers.queue-worker.servicebus_io")
     is_duplicate_run   = _idempotency.is_duplicate_run
     load_run_marker = _idempotency.load_run_marker
+
+    dequeued_at = datetime.now(timezone.utc)
 
     # 1) Deserialise
     try:
@@ -128,16 +135,29 @@ async def _process_message(raw_body: str, traceparent: str = "") -> None:
             tokens_completion=0,
             error_message=marker_error,
             correlation_id=run_msg.correlation_id,
+            dequeued_at=dequeued_at.isoformat(),
+            started_at=dequeued_at.isoformat(),
+            engine_completed_at=dequeued_at.isoformat(),
         )
         _report_result(result, run_msg, traceparent=traceparent)
-        return
+        return result
 
     # 3) Execute the run (blocking – runs in executor)
     loop = asyncio.get_running_loop()
+    started_at = datetime.now(timezone.utc)
     result_msg, artifacts = await loop.run_in_executor(None, execute_run, run_msg)
+    engine_completed_at = datetime.now(timezone.utc)
+    result_msg = result_msg.model_copy(
+        update={
+            "dequeued_at": dequeued_at.isoformat(),
+            "started_at": started_at.isoformat(),
+            "engine_completed_at": engine_completed_at.isoformat(),
+        }
+    )
 
     # 4) Report result
     _report_result(result_msg, run_msg, traceparent=traceparent)
+    return result_msg
 
 
 def _report_result(result: RunResultMessage, run_msg: RunMessage, *, traceparent: str = "") -> None:
@@ -157,6 +177,9 @@ def _report_result(result: RunResultMessage, run_msg: RunMessage, *, traceparent
             tokens_prompt=result.tokens_prompt,
             tokens_completion=result.tokens_completion,
             error_message=result.error_message,
+            dequeued_at=result.dequeued_at,
+            started_at=result.started_at,
+            engine_completed_at=result.engine_completed_at,
             artifacts=result.artifacts,
         )
         patch_run(
@@ -165,6 +188,53 @@ def _report_result(result: RunResultMessage, run_msg: RunMessage, *, traceparent
             correlation_id=run_msg.correlation_id,
             traceparent=traceparent,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Per-message telemetry emission
+# ══════════════════════════════════════════════════════════════════════
+
+def _emit_run_telemetry(
+    *,
+    status: str,
+    dequeued_at: datetime,
+    started_at: datetime,
+    engine_completed_at: datetime,
+    result: RunResultMessage | None,
+    error_detail: str = "",
+) -> None:
+    """Emit a single structured telemetry event for a terminal message outcome.
+
+    Fields are merged into the JSON log line by ``runtime.telemetry.JSONFormatter``.
+    """
+    if result is not None and result.duration_ms:
+        duration_ms = int(result.duration_ms)
+    else:
+        duration_ms = int((engine_completed_at - started_at).total_seconds() * 1000)
+
+    artifacts: list[Any] = []
+    if result is not None and result.artifacts:
+        for art in result.artifacts:
+            try:
+                artifacts.append(art.model_dump(mode="json"))
+            except Exception:
+                artifacts.append(str(art))
+
+    payload: dict[str, Any] = {
+        "event": "run.telemetry",
+        "status": status,
+        "duration_ms": duration_ms,
+        "tokens_prompt": result.tokens_prompt if result else 0,
+        "tokens_completion": result.tokens_completion if result else 0,
+        "correlation_id": correlation_id_var.get("") or (result.correlation_id if result else ""),
+        "dequeued_at": dequeued_at.isoformat(),
+        "started_at": started_at.isoformat(),
+        "engine_completed_at": engine_completed_at.isoformat(),
+        "artifacts": artifacts,
+    }
+    if error_detail:
+        payload["error_detail"] = error_detail
+    logger.info("run.telemetry", extra={"telemetry": payload})
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -210,28 +280,47 @@ async def _worker_loop() -> None:
 
                 async def _handle(m=msg):  # type: ignore[assignment]
                     async with semaphore:
+                        dequeued_at = datetime.now(timezone.utc)
+                        started_at: datetime | None = None
+                        result: RunResultMessage | None = None
+                        terminal_status = "Failed"
+                        error_detail = ""
                         try:
                             body = str(m)
                             app_props = getattr(m, "application_properties", None) or {}
                             traceparent = _coerce_str(
                                 app_props.get("traceparent") or app_props.get(b"traceparent")
                             )
-                            await _process_message(body, traceparent=traceparent)
+                            started_at = datetime.now(timezone.utc)
+                            result = await _process_message(body, traceparent=traceparent)
                             await receiver.complete_message(m)
+                            terminal_status = result.status if result else "Succeeded"
                             logger.info("Message completed.")
-                        except Exception:
+                        except Exception as exc:
+                            error_detail = f"{type(exc).__name__}: {exc}"
                             logger.exception("Message processing failed – dead-lettering.")
                             try:
                                 await receiver.dead_letter_message(
                                     m, reason="ProcessingError",
                                     error_description="See engine logs for details.",
                                 )
+                                terminal_status = "DeadLettered"
                             except Exception:
                                 logger.exception("Dead-lettering failed – abandoning.")
                                 try:
                                     await receiver.abandon_message(m)
+                                    terminal_status = "Abandoned"
                                 except Exception:
                                     logger.exception("Abandon also failed.")
+                        finally:
+                            _emit_run_telemetry(
+                                status=terminal_status,
+                                dequeued_at=dequeued_at,
+                                started_at=started_at or dequeued_at,
+                                engine_completed_at=datetime.now(timezone.utc),
+                                result=result,
+                                error_detail=error_detail,
+                            )
 
                 tasks.append(asyncio.create_task(_handle()))
 

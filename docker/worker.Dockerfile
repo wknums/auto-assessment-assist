@@ -2,8 +2,13 @@
 #  AWReason Queue Worker – Dockerfile
 #  Runtime: Azure Container Apps (Python 3.11-slim)
 #  Scaled by KEDA on Azure Service Bus queue depth.
+#
+#  Base image is sourced from the project ACR (mirrored from Docker Hub
+#  via `az acr import`) to avoid Docker Hub anonymous-pull rate limits
+#  during ACR remote builds.
 # ══════════════════════════════════════════════════════════════════════
-FROM python:3.11-slim AS base
+ARG BASE_IMAGE=acrawra082afe6.azurecr.io/python:3.11-slim
+FROM ${BASE_IMAGE} AS base
 
 # ── Metadata ─────────────────────────────────────────────────────────
 LABEL maintainer="auto-assessment-assist" \

@@ -25,6 +25,17 @@ set -a
 source <(sed 's/\r$//' "$ENV_FILE" | grep -v '^\s*#' | grep '=')
 set +a
 
+AAD_API_CLIENT_ID="${AAD_API_CLIENT_ID:-${AAD_CLIENT_ID:-}}"
+AAD_AUDIENCE="${AAD_AUDIENCE:-${AAD_API_CLIENT_ID}}"
+AAD_API_SCOPE="${AAD_API_SCOPE:-}"
+if [[ -z "$AAD_API_SCOPE" && -n "$AAD_API_CLIENT_ID" ]]; then
+  AAD_API_SCOPE="api://${AAD_API_CLIENT_ID}/access_as_user"
+fi
+if [[ "${AUTH_MODE:-none}" == "entra" && -z "$AAD_API_CLIENT_ID" ]]; then
+  echo "ERROR: AUTH_MODE=entra requires AAD_API_CLIENT_ID. Run setup-identity.sh app first." >&2
+  exit 1
+fi
+
 # ── Set active subscription ──────────────────────────────────────────
 if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
   az account set --subscription "${AZURE_SUBSCRIPTION_ID}" -o none
@@ -51,6 +62,23 @@ CONTAINER_APP_ENV_ID=$(az containerapp env show \
   --query id -o tsv 2>/dev/null | tr -d '\r')
 CONTAINER_APP_ENV_ID="${CONTAINER_APP_ENV_ID:-}"
 
+CONTAINER_APP_ENV_STATE=$(az containerapp env show \
+  --name "${AZ_CONTAINER_APP_ENV_NAME}" \
+  --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+  --query "properties.provisioningState" -o tsv 2>/dev/null | tr -d '\r' || true)
+CONTAINER_APP_ENV_STATE="${CONTAINER_APP_ENV_STATE:-}"
+if [[ "$CONTAINER_APP_ENV_STATE" != "Succeeded" ]]; then
+  echo "ERROR: Container Apps environment '${AZ_CONTAINER_APP_ENV_NAME}' is not usable (state: ${CONTAINER_APP_ENV_STATE:-NOT FOUND})." >&2
+  echo "       Run deploy.sh infra successfully before Terraform apply." >&2
+  exit 1
+fi
+
+CONTAINER_APP_ENV_DEFAULT_DOMAIN=$(az containerapp env show \
+  --name "${AZ_CONTAINER_APP_ENV_NAME}" \
+  --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+  --query "properties.defaultDomain" -o tsv 2>/dev/null | tr -d '\r')
+CONTAINER_APP_ENV_DEFAULT_DOMAIN="${CONTAINER_APP_ENV_DEFAULT_DOMAIN:-}"
+
 ACR_LOGIN_SERVER=$(az acr show \
   --name "${AZ_ACR_NAME}" \
   --resource-group "${AZ_ACR_RG}" \
@@ -67,8 +95,22 @@ ACR_ID="${ACR_ID:-}"
 CONTAINER_APP_FQDN=$(az containerapp show \
   --name "${AZ_CONTAINER_APP_NAME:-awreason-http-service}" \
   --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
-  --query "properties.configuration.ingress.fqdn" -o tsv 2>/dev/null | tr -d '\r')
+  --query "properties.configuration.ingress.fqdn" -o tsv 2>/dev/null | tr -d '\r' || true)
 CONTAINER_APP_FQDN="${CONTAINER_APP_FQDN:-}"
+
+STREAMLIT_REDIRECT_URI_RESOLVED="${STREAMLIT_REDIRECT_URI:-}"
+if [[ -z "$STREAMLIT_REDIRECT_URI_RESOLVED" && -n "$CONTAINER_APP_FQDN" ]]; then
+  STREAMLIT_REDIRECT_URI_RESOLVED="https://${CONTAINER_APP_FQDN}/"
+elif [[ -z "$STREAMLIT_REDIRECT_URI_RESOLVED" && -n "$CONTAINER_APP_ENV_DEFAULT_DOMAIN" ]]; then
+  STREAMLIT_REDIRECT_URI_RESOLVED="https://${AZ_CONTAINER_APP_NAME:-awreason-http-service}.${CONTAINER_APP_ENV_DEFAULT_DOMAIN}/"
+fi
+if [[ -n "$STREAMLIT_REDIRECT_URI_RESOLVED" && "$STREAMLIT_REDIRECT_URI_RESOLVED" != */ ]]; then
+  STREAMLIT_REDIRECT_URI_RESOLVED="${STREAMLIT_REDIRECT_URI_RESOLVED}/"
+fi
+if [[ "${AUTH_MODE:-none}" == "entra" && -z "$STREAMLIT_REDIRECT_URI_RESOLVED" ]]; then
+  echo "ERROR: AUTH_MODE=entra requires STREAMLIT_REDIRECT_URI or a resolvable Container Apps environment domain." >&2
+  exit 1
+fi
 
 # ── Resolve image tag (read from build, fallback to git SHA / timestamp) ──
 SCRIPT_DIR_GEN="$(cd "$(dirname "$0")/.." && pwd)"
@@ -125,6 +167,9 @@ container_app_env_id  = "${CONTAINER_APP_ENV_ID}"
 acr_login_server      = "${ACR_LOGIN_SERVER}"
 acr_id                = "${ACR_ID}"
 image_tag             = "${RESOLVED_IMAGE_TAG}"
+http_min_replicas     = ${HTTP_MIN_REPLICAS:-1}
+http_max_replicas     = ${HTTP_MAX_REPLICAS:-1}
+http_scale_concurrent_requests = ${HTTP_SCALE_CONCURRENT_REQUESTS:-${PER_REPLICA_CONCURRENCY:-24}}
 
 # Blob Storage
 az_storage_name       = "${AZ_STORAGE_NAME}"
@@ -142,7 +187,11 @@ apim_aoai_base_url    = ""
 
 # Entra ID – API auth
 aad_issuer            = "https://login.microsoftonline.com/${AZURE_TENANT_ID}/v2.0"
-aad_audience          = "${AAD_CLIENT_ID}"
+aad_audience          = "${AAD_AUDIENCE}"
+aad_api_client_id     = "${AAD_API_CLIENT_ID}"
+aad_api_scope         = "${AAD_API_SCOPE}"
+aad_required_scope    = "${AAD_REQUIRED_SCOPE:-access_as_user}"
+aad_required_app_role = "${AAD_REQUIRED_APP_ROLE:-TalentMatch.Access}"
 
 # Entra ID – Streamlit UX auth
 aad_client_id         = "${AAD_CLIENT_ID}"
@@ -154,7 +203,7 @@ azure_subscription_id = "${AZURE_SUBSCRIPTION_ID:-}"
 auth_mode             = "${AUTH_MODE:-none}"
 api_key               = "${API_KEY:-}"
 log_level             = "${LOG_LEVEL:-INFO}"
-streamlit_redirect_uri = "https://${CONTAINER_APP_FQDN}/"
+streamlit_redirect_uri = "${STREAMLIT_REDIRECT_URI_RESOLVED}"
 
 # Application Insights
 appinsights_connection_string = "${APPINSIGHTS_CONNECTION_STRING}"

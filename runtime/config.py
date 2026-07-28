@@ -42,7 +42,7 @@ class EngineSettings(BaseSettings):
     aoai_api_version: Optional[str] = Field(None, alias="AOAI_API_VERSION")
 
     # ── Execution ─────────────────────────────────────────────────────
-    per_replica_concurrency: int = Field(1, alias="PER_REPLICA_CONCURRENCY")
+    per_replica_concurrency: int = Field(2, alias="PER_REPLICA_CONCURRENCY")
     workdir_base: str = Field("/work", alias="WORKDIR_BASE")
 
     # ── Telemetry ─────────────────────────────────────────────────────
