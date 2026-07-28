@@ -70,12 +70,24 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 _jwks_client: Optional[jwt.PyJWKClient] = None
 
 
+def _jwks_uri_for_issuer(issuer: str) -> str:
+    """Derive the Entra ID JWKS URL from the configured token issuer.
+
+    ``AAD_ISSUER`` holds the value that must match the token's ``iss`` claim,
+    which for v2.0 tokens ends in ``/v2.0``. The JWKS endpoint, however, hangs
+    off the bare tenant authority, so the suffix must be stripped first --
+    ``https://login.microsoftonline.com/<tenant>/v2.0/discovery/v2.0/keys``
+    returns HTTP 404 and would make every token fail validation.
+    """
+    authority = issuer.rstrip("/").removesuffix("/v2.0")
+    return f"{authority}/discovery/v2.0/keys"
+
+
 def _get_jwks_client() -> jwt.PyJWKClient:
     global _jwks_client
     if _jwks_client is None:
-        issuer = settings.aad_issuer.rstrip("/")
         # Standard Entra ID OIDC well-known / JWKS URL
-        jwks_uri = f"{issuer}/discovery/v2.0/keys"
+        jwks_uri = _jwks_uri_for_issuer(settings.aad_issuer)
         _jwks_client = jwt.PyJWKClient(jwks_uri, cache_keys=True)
         logger.info("JWKS client initialised from %s", jwks_uri)
     return _jwks_client

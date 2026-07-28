@@ -35,10 +35,12 @@ _ALLOWED_CONTENT_TYPES: Set[str] = {
     "text/plain",
     "application/json",
     "application/octet-stream",
+    "image/png",
+    "image/jpeg",
 }
 
 _ALLOWED_EXTENSIONS: Set[str] = {
-    ".pdf", ".docx", ".md", ".txt", ".json",
+    ".pdf", ".docx", ".md", ".txt", ".json", ".png", ".jpg", ".jpeg",
 }
 
 

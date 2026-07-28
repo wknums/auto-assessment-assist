@@ -13,11 +13,18 @@
 !/LICENSE
 !/README.md
 !/requirements.txt
+!/requirements-e2e.txt
 !/.env_sample
+!/.env_qa.example
 !/auto_assess.py
 !/content_document.json
 !/run_awreason_ux.ps1
 !/run_awreason_ux.sh
+
+# Unignore browser integration tests
+!/tests/
+!/tests/e2e/
+/tests/e2e/test_streamlit_awreason.py
 
 # Unignore specific files in experiments directory
 !/o1-assessment/xlsx2json.py
@@ -91,6 +98,11 @@
 !/wrappers/http-service/pyrightconfig.json
 !/wrappers/http-service/app/
 !/wrappers/http-service/app/**
+!/wrappers/http-service/tests/
+!/wrappers/http-service/tests/test_assess_e2e.py
+!/wrappers/http-service/tests/test_auth.py
+!/wrappers/http-service/tests/test_smoke.py
+!/wrappers/http-service/tests/test_utils.py
 !/wrappers/http-service/deploy/
 !/wrappers/http-service/deploy/**
 !/wrappers/http-service/supervisord.conf
@@ -99,6 +111,7 @@
 /wrappers/http-service/.env
 /wrappers/http-service/work/
 /wrappers/http-service/tests/last_e2e_response.json
+/wrappers/http-service/tests/__pycache__/
 /wrappers/http-service/app/__pycache__/
 /wrappers/http-service/deploy/terraform/terraform.tfvars
 /wrappers/http-service/deploy/terraform/.terraform/
