@@ -243,6 +243,14 @@ DEPLOY_ENV_FILE=.env_qa bash deploy.sh yaml
 
 Important: `deploy.sh yaml` now updates an existing Container App when present, and only creates a new app when it does not already exist.
 
+To update only the Azure OpenAI deployment without reapplying the full manifest:
+
+```bash
+DEPLOY_ENV_FILE=.env_qa bash deploy.sh model
+```
+
+The `model` action updates both `AOAI_DEPLOYMENT` and `AZURE_OPENAI_DEPLOYMENT_O1` on the existing Container App.
+
 **Option B – Terraform only:**
 ```bash
 cd deploy/terraform

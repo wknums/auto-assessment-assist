@@ -27,6 +27,10 @@
 /tests/e2e/test_streamlit_awreason.py
 
 # Unignore specific files in experiments directory
+##!/experiments/utils/
+##!/experiments/utils/office_to_image_pdf.py
+##!/experiments/utils/OFFICE_TO_IMAGE_PDF.md
+##!/tests/test_office_to_image_pdf.py
 !/o1-assessment/xlsx2json.py
 !/o1-assessment/run_frontend.py
 
@@ -92,6 +96,7 @@
 !/wrappers/
 !/wrappers/http-service/
 !/wrappers/http-service/README.md
+/wrappers/http-service/ENTRA_SECURITY_GROUP_ACCESS.md
 !/wrappers/http-service/requirements.txt
 !/wrappers/http-service/Dockerfile
 !/wrappers/http-service/.dockerignore

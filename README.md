@@ -63,28 +63,123 @@ Note: The purpose of this Accelerator is NOT to hand over the grading of assignm
 
 ### Local Development Setup
 
-The accelerator can be run locally on a workstation that has VS Code, Git,
-and Python (V3.11 or 3.12) installed.
+#### Prerequisites
 
-  
+The accelerator supports Python 3.11 and 3.12. The Azure deployment scripts are
+written for Bash; on Windows, run them from **Git Bash**, which supplies the
+required `bash`, `sed`, `grep`, `md5sum`, and `cygpath` commands.
 
-clone the git repository to your local vscode environment.
+| Tool | Required for | Version or notes |
+|------|--------------|------------------|
+| [Visual Studio Code](https://code.visualstudio.com/download) | Recommended editor | Current stable release |
+| [Git for Windows](https://git-scm.com/download/win) | Cloning the repository and running deployment scripts from Git Bash | Current stable release |
+| [Python](https://www.python.org/downloads/) | Local application and tests | 3.11 or 3.12 |
+| [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli-windows) | Azure authentication, resource provisioning, ACR builds, and deployment | Current stable release |
+| [Terraform](https://developer.hashicorp.com/terraform/install) | Default Container Apps deployment path | 1.5 or newer |
 
-configure a virtual python environment for use with this project
-    python -m venv .venv
+Docker Desktop is **not required** for Azure deployment because `deploy.sh
+build` uses ACR Tasks to build the image remotely. Terraform is not required
+when using `bash deploy.sh yaml`. Azure Developer CLI (`azd`) is not used by the
+provided deployment scripts.
 
-on Azure Portal, create an Azure AI foundry environment, a project and deploy an Azure OpenAI o1 base model.
+Install the tools on Windows from PowerShell:
 
-use the chat playground in Azure AI Foundry to ask o1 a question to ensure that this works for you before you continue.
+```powershell
+winget install -e --id Microsoft.VisualStudioCode
+winget install -e --id Git.Git
+winget install -e --id Python.Python.3.12
+winget install -e --id Microsoft.AzureCLI
+winget install -e --id Hashicorp.Terraform
+```
 
-create a copy of the .env_sample file and save it as .env
+Close and reopen the terminal after installation, then verify the commands are
+available:
 
-edit the .env file:
+```powershell
+code --version
+git --version
+python --version
+az version
+terraform version
+```
 
+Open Git Bash and verify Bash separately:
 
-copy the endpoint of your Azure OpenAI resource and paste it into the value for the AZURE_OPENAI_ENDPOINT field.
+```bash
+bash --version
+```
 
-save the .env file
+#### VS Code extensions
+
+The Python extension is required for the repository's configured Python
+environment integration. Pylance and the Terraform extension are recommended
+for language support. No Azure VS Code extension is required because deployment
+uses the Azure CLI.
+
+```powershell
+code --install-extension ms-python.python
+code --install-extension ms-python.vscode-pylance
+code --install-extension hashicorp.terraform
+```
+
+The Azure CLI **Container Apps extension** is required for `az containerapp`
+commands. Install or update it after installing the Azure CLI:
+
+```powershell
+az extension add --name containerapp --upgrade
+az extension show --name containerapp --query "{name:name,version:version}" --output table
+```
+
+#### Clone and configure the Python environment
+
+Run from PowerShell:
+
+```powershell
+git clone https://github.com/wknums/auto-assessment-assist.git
+Set-Location auto-assessment-assist
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+Copy-Item .env_sample .env
+```
+
+If PowerShell blocks activation scripts, allow them for the current terminal
+only and activate the environment again:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+On Linux or macOS, activate the environment with:
+
+```bash
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cp .env_sample .env
+```
+
+Create or obtain access to an Azure AI Foundry project with an Azure OpenAI
+model deployment. Use the chat playground to verify the deployment before
+continuing. The provided deployment scripts do not create Azure OpenAI.
+
+Edit `.env` and set at least `AZURE_OPENAI_ENDPOINT`,
+`AZURE_OPENAI_DEPLOYMENT_O1`, and `AZURE_OPENAI_API_VERSION`. When using
+Microsoft Entra authentication instead of an API key, sign in and select the
+subscription:
+
+```powershell
+az login --tenant <tenant-id>
+az account set --subscription <subscription-id>
+az account show --query "{subscription:name,subscriptionId:id,tenantId:tenantId}" --output table
+```
+
+The signed-in local developer needs **Cognitive Services OpenAI User** on the
+Azure OpenAI resource when using Microsoft Entra authentication.
 
 ## HTTP Service Deployment to a New Azure Subscription
 
@@ -95,13 +190,141 @@ network rules. Use `deploy.sh yaml` instead of Terraform when required.
 
 ### Prerequisites
 
-- Azure CLI (`az`) authenticated with `az login`
-- Terraform 1.5 or newer for the default deployment path
-- Permission to create resources and role assignments in the target subscription
-- Microsoft Entra permission to create app registrations, expose API permissions,
-  and assign app roles (Application Administrator or equivalent)
-- An existing Azure OpenAI resource and model deployment; this deployment does
-  not create Azure OpenAI, API Management, or Key Vault
+Complete the local tool installation above. In particular, deployment requires:
+
+- Git Bash on Windows; do not run `deploy.sh` from PowerShell or Command Prompt.
+- Azure CLI authenticated to the target tenant and subscription.
+- The Azure CLI `containerapp` extension.
+- Terraform 1.5 or newer for the default path. Terraform is optional for
+  `bash deploy.sh yaml`.
+- An existing Azure OpenAI resource and model deployment. This deployment does
+  not create Azure OpenAI, API Management, or Key Vault.
+
+`terraform init`, which is run by the deployment flow, downloads the required
+AzureRM provider automatically; no Terraform provider plug-in must be installed
+manually.
+
+#### Required Azure RBAC roles
+
+The deployer needs both resource-management and role-assignment permissions.
+**Contributor alone is not sufficient** because the scripts and Terraform
+create role assignments for the managed identity.
+
+| Scope | Required Azure role | Purpose |
+|-------|---------------------|---------|
+| Target subscription | **Contributor** | Create resource groups, Storage, ACR, Log Analytics, Application Insights, Container Apps resources, managed identities, and optional networking. Subscription scope is needed because the scripts can create multiple resource groups. |
+| Target subscription | **Role Based Access Control Administrator** (or **User Access Administrator**) | Create `Storage Blob Data Contributor`, `Cognitive Services OpenAI User`, and `AcrPull` assignments. The role must include every resource scope on which an assignment is created. |
+
+Assigning **Owner** at the target subscription is a broader alternative that
+includes both capabilities. For least privilege, use Contributor plus Role
+Based Access Control Administrator. If the existing Azure OpenAI resource is
+outside the target subscription or outside the deployer's assigned scope, the
+deployer also needs read access and role-assignment permission on that resource.
+See [Azure built-in roles](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles)
+and [Azure role-assignment prerequisites](https://learn.microsoft.com/azure/role-based-access-control/role-assignments-cli).
+
+An administrator can grant the split roles with Azure CLI:
+
+```bash
+export AZURE_SUBSCRIPTION_ID="<subscription-id>"
+export DEPLOYER_UPN="<deployer-user-principal-name>"
+export DEPLOYER_OBJECT_ID="$(az ad user show --id "$DEPLOYER_UPN" --query id --output tsv)"
+export SUBSCRIPTION_SCOPE="/subscriptions/${AZURE_SUBSCRIPTION_ID}"
+
+az role assignment create \
+  --assignee-object-id "$DEPLOYER_OBJECT_ID" \
+  --assignee-principal-type User \
+  --role "Contributor" \
+  --scope "$SUBSCRIPTION_SCOPE"
+
+az role assignment create \
+  --assignee-object-id "$DEPLOYER_OBJECT_ID" \
+  --assignee-principal-type User \
+  --role "Role Based Access Control Administrator" \
+  --scope "$SUBSCRIPTION_SCOPE"
+```
+
+After role assignment, the deployer should sign in again and verify inherited
+access:
+
+```bash
+az logout
+az login --tenant "<tenant-id>"
+az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+
+DEPLOYER_OBJECT_ID="$(az ad signed-in-user show --query id --output tsv)"
+az role assignment list \
+  --assignee "$DEPLOYER_OBJECT_ID" \
+  --scope "$SUBSCRIPTION_SCOPE" \
+  --include-inherited \
+  --all \
+  --query "[].{role:roleDefinitionName,scope:scope}" \
+  --output table
+```
+
+#### Required Microsoft Entra directory role
+
+Azure RBAC does not grant permission to manage app registrations. To run
+`bash setup-identity.sh app --yes`, the deployer needs **Cloud Application
+Administrator** or **Application Administrator** in the Microsoft Entra tenant.
+This permits creation and management of the API and Streamlit registrations,
+service principals, credentials, exposed permissions, and app-role
+assignments.
+
+The script also attempts tenant-wide admin consent for the delegated
+`access_as_user` permission. If tenant policy prevents the deployer from
+granting consent, a Cloud Application Administrator, Application Administrator,
+or Global Administrator must grant it in the Entra admin center. See
+[grant tenant-wide admin consent](https://learn.microsoft.com/entra/identity/enterprise-apps/grant-admin-consent).
+
+#### Prepare Azure CLI and resource providers
+
+Run these commands from Git Bash before the first deployment to a new
+subscription:
+
+```bash
+az login --tenant "<tenant-id>"
+az account set --subscription "<subscription-id>"
+az account show \
+  --query "{subscription:name,subscriptionId:id,tenantId:tenantId}" \
+  --output table
+
+az upgrade
+az extension add --name containerapp --upgrade
+
+for namespace in \
+  Microsoft.App \
+  Microsoft.ContainerRegistry \
+  Microsoft.Insights \
+  Microsoft.ManagedIdentity \
+  Microsoft.Network \
+  Microsoft.OperationalInsights \
+  Microsoft.Storage
+do
+  az provider register --namespace "$namespace"
+done
+
+for namespace in \
+  Microsoft.App \
+  Microsoft.ContainerRegistry \
+  Microsoft.Insights \
+  Microsoft.ManagedIdentity \
+  Microsoft.Network \
+  Microsoft.OperationalInsights \
+  Microsoft.Storage
+do
+  az provider show \
+    --namespace "$namespace" \
+    --query "{namespace:namespace,state:registrationState}" \
+    --output table
+done
+
+terraform version
+```
+
+Wait until each provider reports `Registered` before deploying. The Container
+Apps setup specifically requires `Microsoft.App` and
+`Microsoft.OperationalInsights`.
 
 ### Configure the Target Subscription
 
@@ -384,37 +607,35 @@ LOG_LEVEL="ERROR"
 
   
 
-Test that your environment is working (Note: this is assuming a Windows OS development environment - for Linux please adapt the paths to use forward / ):
+Test the Windows environment from PowerShell:
 
-in the vscode environment, open a terminal and execute the following commands to activate your virtual environment log in to azure and run a test:
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 
-    .venv\scripts\activate
+az login --tenant <tenant-id>
+az account set --subscription <subscription-id>
 
-    Linux: source .venv/bin/activate
-    
-    pip install -r requirements.txt
+python awreason.py `
+  --pdf_file1 ".\sample_pdfs\Managing your driving and vehicle licenses in Autoria.pdf" `
+  --promptfile ".\prompts\sample_prompt.txt" `
+  --output ".\sample_grading_results"
+```
 
-    az login
-    (or azd auth login)
-    
+On Linux or macOS:
 
-    -----
-    Note: if az login gives an error saying az not found... you need to install the azure cli and optionally also the azure developer cli:
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 
-    
-    # Azure CLI
-    winget install -e --id Microsoft.AzureCLI
+az login --tenant "<tenant-id>"
+az account set --subscription "<subscription-id>"
 
-    # Azure Developer CLI
-    winget install -e --id Microsoft.Azd
-
-    now retry : az login
-    -------  
-
-    python awreason.py --pdf_file1 ".\sample_pdfs\Managing your driving and vehicle licenses in Autoria.pdf" --promptfile ".\prompts\sample_prompt.txt" --output ".\sample_grading_results"
-
-
-    linux: python awreason.py --pdf_file1 "./sample_pdfs/Managing your driving and vehicle licenses in Autoria.pdf" --promptfile "./prompts/sample_prompt.txt" --output "./sample_grading_results"
+python awreason.py \
+  --pdf_file1 "./sample_pdfs/Managing your driving and vehicle licenses in Autoria.pdf" \
+  --promptfile "./prompts/sample_prompt.txt" \
+  --output "./sample_grading_results"
+```
 
 This should run a sample assessment against the sample pdf file provided, show the output in the terminal and the output directory used in the above command. Note that the --output parameter expects an output filepath, but if it points to a directory, it will generate a result file with default name startng with the source file name in that folder - if the folder does not exist it will create it.
 

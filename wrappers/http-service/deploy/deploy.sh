@@ -19,6 +19,7 @@
 #    bash deploy.sh build          # build & push only
 #    bash deploy.sh apply          # terraform apply only
 #    bash deploy.sh yaml           # deploy via ACA YAML (no Terraform)
+#    bash deploy.sh model          # update only the AOAI deployment
 # ══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -91,6 +92,20 @@ resource_exists() {
   # Usage: resource_exists <az-show-command ...>
   # Returns 0 if the resource exists, 1 otherwise.
   "$@" &>/dev/null
+}
+
+resolve_acr_login_server() {
+  local login_server
+  login_server=$(az acr show \
+    --name "${AZ_ACR_NAME}" \
+    --resource-group "${AZ_ACR_RG}" \
+    --query loginServer \
+    --output tsv | tr -d '\r')
+  if [[ -z "${login_server}" ]]; then
+    echo "ERROR: Could not resolve the login server for ACR ${AZ_ACR_NAME} in ${AZ_ACR_RG}." >&2
+    return 1
+  fi
+  printf '%s' "${login_server}"
 }
 
 update_env_var() {
@@ -696,7 +711,7 @@ do_infra() {
 # ── Derived values (re-evaluate after infra) ─────────────────────────
 
 refresh_derived() {
-  ACR_LOGIN_SERVER="${AZ_ACR_NAME}.azurecr.io"
+  ACR_LOGIN_SERVER="$(resolve_acr_login_server)"
   IMAGE_NAME="awreason-http-service"
   # Use the tag from the last build if available; otherwise git SHA; fallback to timestamp
   if [[ -z "${AZ_IMAGE_TAG:-}" ]] || [[ "${AZ_IMAGE_TAG}" == "latest" ]]; then
@@ -733,7 +748,7 @@ print_banner() {
 
 do_build() {
   # Always generate a fresh tag for builds (don't read .last_image_tag)
-  ACR_LOGIN_SERVER="${AZ_ACR_NAME}.azurecr.io"
+  ACR_LOGIN_SERVER="$(resolve_acr_login_server)"
   IMAGE_NAME="awreason-http-service"
   if [[ -z "${AZ_IMAGE_TAG:-}" ]] || [[ "${AZ_IMAGE_TAG}" == "latest" ]]; then
     IMAGE_TAG=$(date -u +"%Y%m%dT%H%M%S")
@@ -1170,6 +1185,31 @@ do_yaml() {
   update_redirect_uris "${yaml_fqdn:-}"
 }
 
+do_model() {
+  local deployment
+  deployment="${AOAI_DEPLOYMENT:-${AZURE_OPENAI_DEPLOYMENT_O1:-}}"
+  if [[ -z "${deployment}" ]]; then
+    echo "ERROR: Set AZURE_OPENAI_DEPLOYMENT_O1 or AOAI_DEPLOYMENT in ${ENV_FILE}." >&2
+    exit 1
+  fi
+
+  echo ""
+  echo "── Updating Azure OpenAI deployment ────────────────────────"
+  echo "  Container App: ${AZ_CONTAINER_APP_NAME}"
+  echo "  Resource group: ${AZ_CONTAINER_APP_ENV_RG}"
+  echo "  Deployment: ${deployment}"
+
+  az containerapp update \
+    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
+    --name "${AZ_CONTAINER_APP_NAME}" \
+    --set-env-vars \
+      "AOAI_DEPLOYMENT=${deployment}" \
+      "AZURE_OPENAI_DEPLOYMENT_O1=${deployment}"
+
+  echo ""
+  echo "✅ Azure OpenAI deployment updated."
+}
+
 # ── Preview ───────────────────────────────────────────────────────────
 
 do_preview() {
@@ -1386,11 +1426,12 @@ case "$ACTION" in
   apply)       do_apply ;;
   applyforce)  do_apply_force ;;
   yaml)    do_yaml ;;
+  model)   do_model ;;
   all)          do_infra; refresh_derived; print_banner; do_build; do_apply ;;
   allforce)     do_infra; refresh_derived; print_banner; do_build; do_apply_force ;;
   *)
-    echo "Usage: $0 {preview|infra|build|apply|applyforce|yaml|all|allforce}" >&2
-    echo "       Optional env override: DEPLOY_ENV_FILE=.env_qa $0 yaml" >&2
+    echo "Usage: $0 {preview|infra|build|apply|applyforce|yaml|model|all|allforce}" >&2
+    echo "       Optional env override: DEPLOY_ENV_FILE=.env_qa $0 model" >&2
     echo ""
     echo "  preview     Show what will be deployed (no changes made)"
     echo "  infra       Ensure ACR, ACA env, storage exist"
@@ -1398,6 +1439,7 @@ case "$ACTION" in
     echo "  apply       Terraform apply (with confirmation)"
     echo "  applyforce  Terraform apply (no confirmation)"
     echo "  yaml        Deploy via ACA YAML manifest (no Terraform)"
+    echo "  model       Update only AOAI_DEPLOYMENT and AZURE_OPENAI_DEPLOYMENT_O1"
     echo "  all         Full deploy: infra → build → apply"
     echo "  allforce    Full deploy: infra → build → apply (no confirmation)"
     exit 1
