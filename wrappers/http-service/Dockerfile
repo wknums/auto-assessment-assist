@@ -52,7 +52,7 @@ COPY wrappers/http-service/supervisord.conf /etc/supervisor/conf.d/supervisord.c
 COPY wrappers/http-service/nginx.conf /etc/nginx/nginx.conf
 
 # ── Verify the app can be imported (catches missing deps/typos) ──────
-RUN WORKDIR_BASE=/tmp PYTHONPATH=/app:/app/o1-assessment python -c "from app.main import app; print('✅ app import OK')"
+RUN WORKDIR_BASE=/tmp AZURE_OPENAI_DEPLOYMENT_REASON01=build-validation PYTHONPATH=/app:/app/o1-assessment python -c "from app.main import app; print('✅ app import OK')"
 
 # ── Create working directory for ephemeral data ──────────────────────
 # nginx needs /var dirs writable by appuser, and /tmp for temp files

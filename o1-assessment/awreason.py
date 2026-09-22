@@ -24,6 +24,46 @@ from pdf2png_utils import extract_pdf_pages_to_images, join_images_in_pairs
 # Initialize logger
 logger = logging.getLogger(__name__)
 
+REASONING_DEPLOYMENT_ENV_VARS = (
+    "AZURE_OPENAI_DEPLOYMENT_REASON01",
+    "AZURE_OPENAI_DEPLOYMENT_REASON02",
+    "AZURE_OPENAI_DEPLOYMENT_REASON03",
+)
+DEFAULT_REASONING_EFFORT = "high"
+
+
+def get_configured_reasoning_models(environ=None):
+    """Return configured reasoning deployments in priority order."""
+    environ = environ if environ is not None else os.environ
+    primary = environ.get(REASONING_DEPLOYMENT_ENV_VARS[0], "").strip()
+    if not primary:
+        raise ValueError(
+            f"{REASONING_DEPLOYMENT_ENV_VARS[0]} environment variable is required."
+        )
+
+    deployments = [primary]
+    for env_name in REASONING_DEPLOYMENT_ENV_VARS[1:]:
+        deployment = environ.get(env_name, "").strip()
+        if deployment and deployment not in deployments:
+            deployments.append(deployment)
+    return deployments
+
+
+def resolve_reasoning_model(requested_model=None, environ=None):
+    """Resolve an optional model selection against configured deployments."""
+    deployments = get_configured_reasoning_models(environ)
+    if not requested_model:
+        return deployments[0]
+
+    requested_model = requested_model.strip()
+    if requested_model not in deployments:
+        raise ValueError(
+            f"Reasoning model '{requested_model}' is not configured. "
+            f"Available models: {', '.join(deployments)}"
+        )
+    return requested_model
+
+
 def get_model_type(deployment_name):
     """
     Determine the model type based on the deployment name.
@@ -89,9 +129,7 @@ def get_model_config(model_type, api_version, json_template=None, reasoning_effo
         # which is required by o1/o3/o4 models
         if api_version >= "2024":
             config['max_tokens_param'] = 'max_completion_tokens'
-            # Add reasoning_effort only if we're not using structured output
-            if not json_template:
-                config['reasoning_param'] = {'reasoning_effort': reasoning_effort}
+            config['reasoning_param'] = {'reasoning_effort': reasoning_effort}
         else:
             config['max_tokens_param'] = 'max_tokens'
         
@@ -393,12 +431,16 @@ def main():
     parser = argparse.ArgumentParser(description='Chat with Azure OpenAI reasoning models (O1, O3, GPT-5.1, GPT-5.2) using text and images')
 
     # Add model selection argument
-    parser.add_argument('--model', type=str, help='Override model deployment name (default: from AZURE_OPENAI_DEPLOYMENT_O1 env var)')
+    parser.add_argument(
+        '--model',
+        type=str,
+        help='Select one of the deployments configured by AZURE_OPENAI_DEPLOYMENT_REASON01/02/03 (default: REASON01)',
+    )
     parser.add_argument(
         '--reasoning-effort',
         dest='reasoning_effort',
         choices=['low', 'medium', 'high'],
-        default='high',
+        default=DEFAULT_REASONING_EFFORT,
         help='Reasoning effort for supported O3 and GPT-5.x models (default: high)'
     )
     
@@ -567,7 +609,11 @@ def main():
 
     # Retrieve environment variables with defaults
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    deployment = args.model if args.model else os.getenv("AZURE_OPENAI_DEPLOYMENT_O1", "o1")
+    try:
+        deployment = resolve_reasoning_model(args.model)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
     tenant_id = os.getenv("AZURE_TENANT_ID")
     subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
@@ -627,9 +673,6 @@ def main():
     # Validate configuration
     if not endpoint:
         logger.error("AZURE_OPENAI_ENDPOINT environment variable is not set!")
-        sys.exit(1)
-    if not deployment:
-        logger.error("AZURE_OPENAI_DEPLOYMENT_O1 environment variable is not set!")
         sys.exit(1)
     if not api_version:
         logger.error("AZURE_OPENAI_API_VERSION environment variable is not set!")
@@ -954,7 +997,7 @@ def main():
         
         # Create a simplified parameter set based on model type
         if model_type == 'gpt5':
-            # GPT-5.x fallback (remove reasoning parameters)
+            # GPT-5.x fallback keeps the requested reasoning effort.
             # Wrap input_content in a message structure with role
             fallback_params = {
                 "model": deployment,
@@ -967,14 +1010,16 @@ def main():
             }
             # Use appropriate max tokens parameter
             fallback_params["max_output_tokens"] = 15000
+            fallback_params["reasoning"] = {"effort": args.reasoning_effort}
             # Keep response_format if template was provided
             if json_template:
                 fallback_params["response_format"] = {"type": "json_object"}
         else:
-            # O1/O3 fallback (removing reasoning_effort)
+            # O1/O3 fallback keeps the requested reasoning effort.
             fallback_params = {
                 "model": deployment,
-                "messages": messages
+                "messages": messages,
+                "reasoning_effort": args.reasoning_effort,
                 #,            "temperature": 0.2   #not supported by O1
             }
             
@@ -1150,7 +1195,8 @@ if __name__ == "__main__":
         
         # Log environment variables for debugging
         logger.debug(f"AZURE_OPENAI_ENDPOINT: {os.getenv('AZURE_OPENAI_ENDPOINT', 'NOT SET')}")
-        logger.debug(f"AZURE_OPENAI_DEPLOYMENT_O1: {os.getenv('AZURE_OPENAI_DEPLOYMENT_O1', 'NOT SET')}")
+        for env_name in REASONING_DEPLOYMENT_ENV_VARS:
+            logger.debug(f"{env_name}: {os.getenv(env_name, 'NOT SET')}")
         logger.debug(f"AZURE_OPENAI_API_VERSION: {os.getenv('AZURE_OPENAI_API_VERSION', 'NOT SET (will use default)')}")
         
         # Log Python and OpenAI library versions

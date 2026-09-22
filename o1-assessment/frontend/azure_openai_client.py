@@ -61,7 +61,7 @@ def send_chat_completion(client, messages, deployment=None, max_tokens=4000, tem
     Args:
         client (AzureOpenAI): Initialized Azure OpenAI client
         messages (list): List of message dictionaries with 'role' and 'content'
-        deployment (str, optional): Deployment name. Defaults to AZURE_OPENAI_DEPLOYMENT_O1 env var
+        deployment (str, optional): Deployment name. Defaults to AZURE_OPENAI_DEPLOYMENT_REASON01 env var
         max_tokens (int, optional): Maximum tokens for completion. Defaults to 4000
         temperature (float, optional): Sampling temperature. If None, uses model default
         
@@ -72,7 +72,9 @@ def send_chat_completion(client, messages, deployment=None, max_tokens=4000, tem
         Exception: If the API call fails
     """
     if deployment is None:
-        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_O1", "o1")
+        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_REASON01")
+        if not deployment:
+            raise ValueError("AZURE_OPENAI_DEPLOYMENT_REASON01 environment variable is required")
     
     # Build completion parameters
     completion_params = {

@@ -27,7 +27,13 @@ except ImportError as e:
 
 # Import API client for API execution mode
 try:
-    from api_client import run_assessment_via_api, check_api_health
+    from api_client import (
+        ReasoningModelsError,
+        check_api_health,
+        get_reasoning_models,
+        get_reasoning_models_from_environment,
+        run_assessment_via_api,
+    )
     API_CLIENT_AVAILABLE = True
 except ImportError as e:
     API_CLIENT_AVAILABLE = False
@@ -217,7 +223,7 @@ def display_file_content(file_path):
 
 def run_assessment(prompt_file_path, pdf_files, join_option, json_template_path, output_dir,
                   status_placeholder, console_placeholder, console_output, md_file_path=None,
-                  image_folder=None, reasoning_effort="high"):
+                  image_folder=None, reasoning_model=None, reasoning_effort="high"):
     """Run the assessment using awreason.py script.
 
     Added support for optional markdown context file (passed via --md_file to awreason.py).
@@ -265,6 +271,9 @@ def run_assessment(prompt_file_path, pdf_files, join_option, json_template_path,
         # Add join option if selected
         if join_option:
             cmd.extend(["--join", join_option])
+
+        if reasoning_model:
+            cmd.extend(["--model", reasoning_model])
 
         # Add reasoning effort for supported reasoning models
         if reasoning_effort:
@@ -938,11 +947,12 @@ def main():
             help="Direct mode runs awreason.py as a subprocess. API mode sends the request to the AWReason HTTP service.",
             horizontal=True,
         )
-        
+
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+        api_endpoint = os.environ.get("AWR_API_ENDPOINT", "http://127.0.0.1:8080")
+
         if execution_mode == "api":
-            from dotenv import load_dotenv
-            load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-            api_endpoint = os.environ.get("AWR_API_ENDPOINT", "http://127.0.0.1:8080")
             st.info(f"API endpoint: **{api_endpoint}**  \nAPI docs: [{api_endpoint}/docs]({api_endpoint}/docs)")
             
             if not API_CLIENT_AVAILABLE:
@@ -957,6 +967,22 @@ def main():
                         st.warning(f"API is alive but NOT ready: {'; '.join(health['errors'])}")
                     else:
                         st.error(f"API is not reachable: {'; '.join(health['errors'])}")
+
+        reasoning_contract = None
+        reasoning_contract_error = None
+        if API_CLIENT_AVAILABLE:
+            try:
+                if execution_mode == "api":
+                    reasoning_contract = get_reasoning_models(api_endpoint)
+                else:
+                    reasoning_contract = get_reasoning_models_from_environment()
+            except ReasoningModelsError as exc:
+                reasoning_contract_error = str(exc)
+        else:
+            reasoning_contract_error = (
+                "Reasoning-model configuration cannot be loaded because the "
+                "API client module is unavailable."
+            )
         
         st.markdown("---")
         
@@ -978,12 +1004,55 @@ def main():
         )
 
         st.subheader("Model Options")
-        reasoning_effort = st.selectbox(
-            "Reasoning effort",
-            options=["low", "medium", "high"],
-            index=2,
-            help="Controls reasoning effort for supported O3 and GPT-5.x models."
-        )
+        if reasoning_contract_error:
+            st.error(reasoning_contract_error)
+
+        model_column, effort_column = st.columns(2)
+        with model_column:
+            if reasoning_contract:
+                model_options = [
+                    model["deployment"] for model in reasoning_contract["models"]
+                ]
+                default_model = reasoning_contract["defaultModel"]
+                reasoning_model = st.selectbox(
+                    "Reasoning model",
+                    options=model_options,
+                    index=model_options.index(default_model),
+                    help=(
+                        "Select one of the reasoning deployments configured by "
+                        "AZURE_OPENAI_DEPLOYMENT_REASON01/02/03."
+                    ),
+                    key=f"reasoning_model_{execution_mode}",
+                )
+                st.caption(f"Default deployment: `{default_model}`")
+            else:
+                st.selectbox(
+                    "Reasoning model",
+                    options=["Unavailable"],
+                    disabled=True,
+                    help="Resolve the configuration error above before running.",
+                )
+                reasoning_model = None
+
+        with effort_column:
+            effort_options = (
+                reasoning_contract["supportedReasoningEfforts"]
+                if reasoning_contract
+                else ["low", "medium", "high"]
+            )
+            default_effort = (
+                reasoning_contract["defaultReasoningEffort"]
+                if reasoning_contract
+                else "high"
+            )
+            reasoning_effort = st.selectbox(
+                "Reasoning effort",
+                options=effort_options,
+                index=effort_options.index(default_effort),
+                help="Controls reasoning effort for supported reasoning models.",
+            )
+
+        reasoning_configuration_ready = reasoning_model is not None
     
     with tab3:
         st.markdown("<h2 class='section-header'>Batch Document Processing</h2>", unsafe_allow_html=True)
@@ -1335,10 +1404,18 @@ def main():
         batch_output_dir = st.session_state.batch_output_directory
         
         # Run batch processing button
-        batch_run_disabled = not (batch_prompt_file and batch_doc_files)
+        batch_run_disabled = (
+            not (batch_prompt_file and batch_doc_files)
+            or not reasoning_configuration_ready
+        )
         
-        if batch_run_disabled:
+        if not (batch_prompt_file and batch_doc_files):
             st.warning("Please upload a prompt file and at least one document file (.docx or .pdf) to start batch processing.")
+        elif not reasoning_configuration_ready:
+            st.warning(
+                "Resolve the reasoning-model configuration error under "
+                "Advanced Options before starting batch processing."
+            )
         
         # Show multi-run summary
         if num_runs_per_doc > 1:
@@ -1561,6 +1638,7 @@ def main():
                                     prompt_file_path=str(batch_prompt_path),
                                     pdf_files=_api_pdfs,
                                     join_option=join_option,
+                                    reasoning_model=reasoning_model,
                                     reasoning_effort=reasoning_effort,
                                     json_template_path=str(batch_json_path) if batch_json_path else None,
                                     md_file_path=_api_md,
@@ -1661,6 +1739,9 @@ def main():
                             # Add image joining mode if configured
                             if join_option:
                                 cmd_analyze.extend(["--join", join_option])
+
+                            if reasoning_model:
+                                cmd_analyze.extend(["--model", reasoning_model])
 
                             # Add reasoning effort for supported reasoning models
                             if reasoning_effort:
@@ -2540,6 +2621,13 @@ def main():
     
     # Process files and run assessment when the button is clicked
     if run_button:
+        if not reasoning_configuration_ready:
+            st.error(
+                "A reasoning model is not available. Resolve the model "
+                "configuration error under Advanced Options before running."
+            )
+            return
+
         # Create a two-column layout for the assessment process
         process_col1, process_col2 = st.columns([3, 2])
         
@@ -2651,6 +2739,7 @@ def main():
                     prompt_file_path=str(prompt_path),
                     pdf_files=pdf_paths,
                     join_option=join_option,
+                    reasoning_model=reasoning_model,
                     reasoning_effort=reasoning_effort,
                     json_template_path=str(json_template_path) if json_template_path else None,
                     md_file_path=str(md_path) if md_path else None,
@@ -2674,6 +2763,7 @@ def main():
                     console_output,
                     md_file_path=str(md_path) if md_path else None,
                     image_folder=str(images_dir) if image_paths else None,
+                    reasoning_model=reasoning_model,
                     reasoning_effort=reasoning_effort,
                 )
             

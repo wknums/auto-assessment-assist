@@ -122,10 +122,26 @@ variable "azure_openai_endpoint" {
   description = "Azure OpenAI endpoint URL."
 }
 
-variable "aoai_deployment" {
+variable "reasoning_deployment_01" {
   type        = string
-  default     = "o1"
-  description = "Azure OpenAI deployment name."
+  description = "Required default Azure OpenAI reasoning deployment name."
+
+  validation {
+    condition     = length(trimspace(var.reasoning_deployment_01)) > 0
+    error_message = "reasoning_deployment_01 must not be empty."
+  }
+}
+
+variable "reasoning_deployment_02" {
+  type        = string
+  default     = ""
+  description = "Optional second Azure OpenAI reasoning deployment name."
+}
+
+variable "reasoning_deployment_03" {
+  type        = string
+  default     = ""
+  description = "Optional third Azure OpenAI reasoning deployment name."
 }
 
 variable "aoai_api_version" {
@@ -385,7 +401,7 @@ resource "azurerm_container_app" "awreason" {
 
       env {
         name  = "AOAI_DEPLOYMENT"
-        value = var.aoai_deployment
+        value = var.reasoning_deployment_01
       }
 
       env {
@@ -484,8 +500,18 @@ resource "azurerm_container_app" "awreason" {
       }
 
       env {
-        name  = "AZURE_OPENAI_DEPLOYMENT_O1"
-        value = var.aoai_deployment
+        name  = "AZURE_OPENAI_DEPLOYMENT_REASON01"
+        value = var.reasoning_deployment_01
+      }
+
+      env {
+        name  = "AZURE_OPENAI_DEPLOYMENT_REASON02"
+        value = var.reasoning_deployment_02
+      }
+
+      env {
+        name  = "AZURE_OPENAI_DEPLOYMENT_REASON03"
+        value = var.reasoning_deployment_03
       }
 
       env {

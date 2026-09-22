@@ -4,7 +4,7 @@
 Pydantic models for request/response contracts and RFC 7807 problem details.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 import uuid
 
@@ -12,6 +12,7 @@ import uuid
 AGGREGATION_PROFILE_GENERIC = "generic_passthrough"
 AGGREGATION_PROFILE_CV = "cv_scoring_v1"
 AGGREGATION_PROFILE_PATTERN = "^(generic_passthrough|cv_scoring_v1)$"
+ReasoningEffort = Literal["low", "medium", "high"]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -20,15 +21,51 @@ AGGREGATION_PROFILE_PATTERN = "^(generic_passthrough|cv_scoring_v1)$"
 
 class RunProfile(BaseModel):
     """Optional per-run tuning knobs."""
+    model_config = ConfigDict(populate_by_name=True)
+
     join_mode: Optional[str] = Field(
         None,
+        alias="joinMode",
         description="'horizontal' or 'vertical' – how to join extracted PDF page images.",
         pattern="^(horizontal|vertical)$",
     )
     json_template_blob_uri: Optional[str] = Field(
         None,
+        alias="jsonTemplateBlobUri",
         description="Blob URI of a JSON template for structured output.",
     )
+    reasoning_model: Optional[str] = Field(
+        None,
+        alias="reasoningModel",
+        description="Configured reasoning deployment name. Defaults to REASON01.",
+    )
+    reasoning_effort: ReasoningEffort = Field(
+        "high",
+        alias="reasoningEffort",
+        description="Reasoning effort: low, medium, or high.",
+    )
+
+
+class ReasoningModelInfo(BaseModel):
+    slot: Literal["reason01", "reason02", "reason03"]
+    deployment: str
+    is_default: bool = Field(False, alias="isDefault")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ReasoningModelsResponse(BaseModel):
+    default_model: str = Field(..., alias="defaultModel")
+    default_reasoning_effort: ReasoningEffort = Field(
+        "high", alias="defaultReasoningEffort"
+    )
+    supported_reasoning_efforts: List[ReasoningEffort] = Field(
+        default_factory=lambda: ["low", "medium", "high"],
+        alias="supportedReasoningEfforts",
+    )
+    models: List[ReasoningModelInfo]
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class AssessRequestJSON(BaseModel):

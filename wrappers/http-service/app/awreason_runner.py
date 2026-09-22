@@ -88,6 +88,7 @@ def _build_cli_args(
     md_file: Optional[Path] = None,
     json_template: Optional[Path] = None,
     join_mode: Optional[str] = None,
+    reasoning_model: Optional[str] = None,
     reasoning_effort: str = "high",
     images_folder1: Optional[Path] = None,
     images_folder2: Optional[Path] = None,
@@ -113,6 +114,8 @@ def _build_cli_args(
         args += ["--jsonout_template", str(json_template)]
     if join_mode:
         args += ["--join", join_mode]
+    if reasoning_model:
+        args += ["--model", reasoning_model]
     if reasoning_effort:
         args += ["--reasoning-effort", reasoning_effort]
     if images_folder1:
@@ -450,6 +453,8 @@ async def run_assessment(
     md_file: Optional[Path] = None,
     json_template: Optional[Path] = None,
     join_mode: Optional[str] = None,
+    reasoning_model: Optional[str] = None,
+    reasoning_effort: str = "high",
     images_folder1: Optional[Path] = None,
     images_folder2: Optional[Path] = None,
     numruns: int = 1,
@@ -489,6 +494,8 @@ async def run_assessment(
             md_file=md_file,
             json_template=json_template,
             join_mode=join_mode,
+            reasoning_model=reasoning_model,
+            reasoning_effort=reasoning_effort,
             images_folder1=images_folder1,
             images_folder2=images_folder2,
             output_path=out_file,
@@ -564,6 +571,7 @@ async def run_passthrough(
     md_file: Optional[Path] = None,
     json_template: Optional[Path] = None,
     join_mode: Optional[str] = None,
+    reasoning_model: Optional[str] = None,
     reasoning_effort: str = "high",
     images_folder1: Optional[Path] = None,
     images_folder2: Optional[Path] = None,
@@ -593,6 +601,7 @@ async def run_passthrough(
         md_file=md_file,
         json_template=json_template,
         join_mode=join_mode,
+        reasoning_model=reasoning_model,
         reasoning_effort=reasoning_effort,
         images_folder1=images_folder1,
         images_folder2=images_folder2,

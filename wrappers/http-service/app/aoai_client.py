@@ -75,7 +75,7 @@ class AOAIClient:
         logger.info(
             "AzureOpenAI client ready (endpoint=%s, deployment=%s, api_version=%s).",
             base_url,
-            settings.aoai_deployment,
+            settings.azure_openai_deployment_reason01,
             settings.aoai_api_version,
         )
         return self._client
@@ -111,7 +111,7 @@ class AOAIClient:
         Returns the raw ``ChatCompletion`` object.
         """
         client = self._ensure_client()
-        model = deployment or settings.aoai_deployment
+        model = settings.resolve_reasoning_model(deployment)
 
         params: Dict[str, Any] = {
             "model": model,
@@ -120,7 +120,7 @@ class AOAIClient:
         }
 
         # reasoning_effort is only valid for some models/api versions
-        if reasoning_effort and not response_format:
+        if reasoning_effort:
             params["reasoning_effort"] = reasoning_effort
 
         if response_format:

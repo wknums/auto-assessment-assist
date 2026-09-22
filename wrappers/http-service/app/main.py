@@ -84,6 +84,8 @@ app.add_middleware(
         "X-AWR-Duration-Ms",
         "X-AWR-Output-Filename",
         "X-AWR-Run-Id",
+        "X-AWR-Reasoning-Model",
+        "X-AWR-Reasoning-Effort",
         "X-Correlation-Id",
         "X-Correlation-ID",
         "Content-Disposition",

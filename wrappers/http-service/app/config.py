@@ -10,7 +10,7 @@ Azure Container Apps or a local .env file.
 from __future__ import annotations
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -48,9 +48,50 @@ class Settings(BaseSettings):
 
     # ── Azure OpenAI / APIM AI Gateway ────────────────────────────────
     apim_aoai_base_url: str = Field("", alias="APIM_AOAI_BASE_URL")
-    aoai_deployment: str = Field("o1", alias="AOAI_DEPLOYMENT")
+    azure_openai_deployment_reason01: str = Field(
+        ..., alias="AZURE_OPENAI_DEPLOYMENT_REASON01"
+    )
+    azure_openai_deployment_reason02: str = Field(
+        "", alias="AZURE_OPENAI_DEPLOYMENT_REASON02"
+    )
+    azure_openai_deployment_reason03: str = Field(
+        "", alias="AZURE_OPENAI_DEPLOYMENT_REASON03"
+    )
     aoai_api_version: str = Field("2024-12-01-preview", alias="AOAI_API_VERSION")
     use_aad_for_aoai: bool = Field(True, alias="USE_AAD_FOR_AOAI")
+
+    @field_validator("azure_openai_deployment_reason01")
+    @classmethod
+    def validate_primary_reasoning_deployment(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("AZURE_OPENAI_DEPLOYMENT_REASON01 must not be empty")
+        return value
+
+    @property
+    def reasoning_models(self) -> list[str]:
+        deployments: list[str] = []
+        for deployment in (
+            self.azure_openai_deployment_reason01,
+            self.azure_openai_deployment_reason02,
+            self.azure_openai_deployment_reason03,
+        ):
+            deployment = deployment.strip()
+            if deployment and deployment not in deployments:
+                deployments.append(deployment)
+        return deployments
+
+    def resolve_reasoning_model(self, requested_model: str | None = None) -> str:
+        if requested_model is None or not requested_model.strip():
+            return self.azure_openai_deployment_reason01
+
+        requested_model = requested_model.strip()
+        if requested_model not in self.reasoning_models:
+            raise ValueError(
+                f"Reasoning model '{requested_model}' is not configured. "
+                f"Available models: {', '.join(self.reasoning_models)}"
+            )
+        return requested_model
 
     # Direct Azure OpenAI (used when APIM is not configured)
     azure_openai_endpoint: str = Field("", alias="AZURE_OPENAI_ENDPOINT")

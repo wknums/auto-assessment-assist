@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
+from pydantic import ValidationError
 
 from app.awreason_runner import run_assessment, run_passthrough
 from app.cleanup import new_run_workdir
@@ -31,7 +32,10 @@ from app.models import (
     AssessResponse,
     MustHaveResult,
     ProblemDetail,
+    ReasoningModelInfo,
+    ReasoningModelsResponse,
     RequestStatusResponse,
+    RunProfile,
     SingleRunResult,
     TimingsMs,
     TokenUsage,
@@ -119,6 +123,43 @@ async def ready():
 
 
 @assess_router.get(
+    "/reasoning-models",
+    response_model=ReasoningModelsResponse,
+    summary="List configured reasoning models",
+)
+async def reasoning_models():
+    """Return selectable reasoning deployments and default reasoning settings."""
+    models = [
+        ReasoningModelInfo(
+            slot="reason01",
+            deployment=settings.azure_openai_deployment_reason01,
+            isDefault=True,
+        )
+    ]
+    if settings.azure_openai_deployment_reason02.strip():
+        models.append(
+            ReasoningModelInfo(
+                slot="reason02",
+                deployment=settings.azure_openai_deployment_reason02.strip(),
+                isDefault=False,
+            )
+        )
+    if settings.azure_openai_deployment_reason03.strip():
+        models.append(
+            ReasoningModelInfo(
+                slot="reason03",
+                deployment=settings.azure_openai_deployment_reason03.strip(),
+                isDefault=False,
+            )
+        )
+    return ReasoningModelsResponse(
+        defaultModel=settings.azure_openai_deployment_reason01,
+        defaultReasoningEffort="high",
+        models=models,
+    )
+
+
+@assess_router.get(
     "/assess/status/{request_id}",
     response_model=RequestStatusResponse,
     summary="Get request processing status",
@@ -168,6 +209,11 @@ async def assess_json(
     rid = uuid.uuid4().hex
     run_id_var.set(rid)
     request_id = _resolve_request_id(request=request, correlation_id=cid, run_id=rid)
+    run_profile = body.run_profile or RunProfile.model_validate({})
+    try:
+        reasoning_model = settings.resolve_reasoning_model(run_profile.reasoning_model)
+    except ValueError as exc:
+        return _problem(400, "Invalid reasoningModel", str(exc), cid, request.url.path)
 
     sem = get_semaphore()
     io_start = now_ms()
@@ -239,6 +285,8 @@ async def assess_json(
                         md_file=md_file,
                         json_template=json_template,
                         join_mode=join_mode,
+                        reasoning_model=reasoning_model,
+                        reasoning_effort=run_profile.reasoning_effort,
                         numruns=body.numruns,
                     )
                     awreason_elapsed = elapsed_ms(awreason_start)
@@ -335,7 +383,11 @@ async def assess_upload(
     job_id = body_dict.get("jobId", "")
     application_id = body_dict.get("applicationId", "")
     numruns = int(body_dict.get("numruns", 1))
-    run_profile = body_dict.get("runProfile", {})
+    try:
+        run_profile = RunProfile.model_validate(body_dict.get("runProfile") or {})
+        reasoning_model = settings.resolve_reasoning_model(run_profile.reasoning_model)
+    except (ValidationError, ValueError) as exc:
+        return _problem(400, "Invalid runProfile", str(exc), cid, request.url.path)
     return_artifacts = body_dict.get("returnArtifacts", True)
 
     correlation_id_var.set(cid)
@@ -398,12 +450,12 @@ async def assess_upload(
                         md_file = local_spec
                         pdf2 = None
 
-                    join_mode = run_profile.get("joinMode")
+                    join_mode = run_profile.join_mode
                     json_template: Optional[Path] = None
-                    if "jsonTemplateBlobUri" in run_profile:
+                    if run_profile.json_template_blob_uri:
                         json_template = await download_blob_to_path(
-                            run_profile["jsonTemplateBlobUri"],
-                            downloads_dir / _blob_filename(run_profile["jsonTemplateBlobUri"]),
+                            run_profile.json_template_blob_uri,
+                            downloads_dir / _blob_filename(run_profile.json_template_blob_uri),
                         )
 
                     awreason_start = now_ms()
@@ -415,6 +467,8 @@ async def assess_upload(
                         md_file=md_file,
                         json_template=json_template,
                         join_mode=join_mode,
+                        reasoning_model=reasoning_model,
+                        reasoning_effort=run_profile.reasoning_effort,
                         numruns=numruns,
                     )
                     awreason_elapsed = elapsed_ms(awreason_start)
@@ -502,6 +556,11 @@ async def assess_passthrough(
                                                description="Optional JSON output template."),
     join_mode: Optional[str] = Form(default=None, alias="joinMode",
                                     description="'horizontal' or 'vertical' image joining."),
+    reasoning_model: Optional[str] = Form(
+        default=None,
+        alias="reasoningModel",
+        description="Configured reasoning deployment name. Defaults to REASON01.",
+    ),
     reasoning_effort: str = Form(default="high", alias="reasoningEffort",
                                  description="Reasoning effort for supported O3 and GPT-5.x models."),
     batch_id: Optional[str] = Form(default=None, alias="batchId",
@@ -539,6 +598,10 @@ async def assess_passthrough(
     rid = uuid.uuid4().hex
     run_id_var.set(rid)
     request_id = _resolve_request_id(request=request, correlation_id=cid, run_id=rid)
+    try:
+        selected_reasoning_model = settings.resolve_reasoning_model(reasoning_model)
+    except ValueError as exc:
+        return _problem(400, "Invalid reasoningModel", str(exc), cid, request.url.path)
 
     sem = get_semaphore()
 
@@ -668,6 +731,7 @@ async def assess_passthrough(
                         md_file=md_file,
                         json_template=local_json_template,
                         join_mode=join_mode,
+                        reasoning_model=selected_reasoning_model,
                         reasoning_effort=reasoning_effort,
                         images_folder1=images_folder,
                     )
@@ -718,9 +782,11 @@ async def assess_passthrough(
                         "X-AWR-Duration-Ms": str(result["duration_ms"]),
                         "X-AWR-Output-Filename": output_filename,
                         "X-AWR-Run-Id": rid,
+                        "X-AWR-Reasoning-Model": selected_reasoning_model,
+                        "X-AWR-Reasoning-Effort": reasoning_effort,
                         "X-Correlation-Id": cid,
                         "Content-Disposition": f'attachment; filename="{output_filename}"',
-                        "Access-Control-Expose-Headers": "X-AWR-Exit-Code, X-AWR-Duration-Ms, X-AWR-Output-Filename, X-AWR-Run-Id, X-AWR-Batch-Id, X-Correlation-Id, X-AWR-Artifact-URIs, X-AWR-Aggregation-URI, X-AWR-Aggregation-Profile, Content-Disposition",
+                        "Access-Control-Expose-Headers": "X-AWR-Exit-Code, X-AWR-Duration-Ms, X-AWR-Output-Filename, X-AWR-Run-Id, X-AWR-Reasoning-Model, X-AWR-Reasoning-Effort, X-AWR-Batch-Id, X-Correlation-Id, X-AWR-Artifact-URIs, X-AWR-Aggregation-URI, X-AWR-Aggregation-Profile, Content-Disposition",
                     }
                     if batch_id:
                         headers["X-AWR-Batch-Id"] = batch_id

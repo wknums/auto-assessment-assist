@@ -168,7 +168,7 @@ model deployment. Use the chat playground to verify the deployment before
 continuing. The provided deployment scripts do not create Azure OpenAI.
 
 Edit `.env` and set at least `AZURE_OPENAI_ENDPOINT`,
-`AZURE_OPENAI_DEPLOYMENT_O1`, and `AZURE_OPENAI_API_VERSION`. When using
+`AZURE_OPENAI_DEPLOYMENT_REASON01`, and `AZURE_OPENAI_API_VERSION`. When using
 Microsoft Entra authentication instead of an API key, sign in and select the
 subscription:
 
@@ -364,7 +364,9 @@ AZ_IDENTITIES_REUSE=FALSE
 AZURE_OPENAI_ENDPOINT=https://<account>.openai.azure.com/
 AZ_AOAI_RESOURCE_NAME=<account>
 AZ_AOAI_RESOURCE_RG=<azure-openai-resource-group>
-AZURE_OPENAI_DEPLOYMENT_O1=<model-deployment>
+AZURE_OPENAI_DEPLOYMENT_REASON01=<default-reasoning-model-deployment>
+AZURE_OPENAI_DEPLOYMENT_REASON02=<optional-reasoning-model-deployment>
+AZURE_OPENAI_DEPLOYMENT_REASON03=<optional-reasoning-model-deployment>
 AZURE_OPENAI_API_VERSION=2024-12-01-preview
 
 AUTH_MODE=entra
@@ -517,7 +519,7 @@ The code checks for API key first. If found, it uses API key authentication. If 
 ```
 AZURE_OPENAI_ENDPOINT="https://your-resource.cognitiveservices.azure.com/"
 # AZURE_OPENAI_API_KEY="commented-out-for-security"
-AZURE_OPENAI_DEPLOYMENT_O1="o1"
+AZURE_OPENAI_DEPLOYMENT_REASON01="o1"
 AZURE_TENANT_ID="your-tenant-id-here"
 AZURE_SUBSCRIPTION_ID="your-subscription-id-here"
 ```

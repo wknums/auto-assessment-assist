@@ -179,7 +179,9 @@ blob_account_id       = "${BLOB_ACCOUNT_ID}"
 # Azure OpenAI
 azure_openai_endpoint = "${AZURE_OPENAI_ENDPOINT}"
 aoai_account_id       = "${AOAI_ACCOUNT_ID}"
-aoai_deployment       = "${AZURE_OPENAI_DEPLOYMENT_O1:-o3}"
+reasoning_deployment_01 = "${AZURE_OPENAI_DEPLOYMENT_REASON01}"
+reasoning_deployment_02 = "${AZURE_OPENAI_DEPLOYMENT_REASON02:-}"
+reasoning_deployment_03 = "${AZURE_OPENAI_DEPLOYMENT_REASON03:-}"
 aoai_api_version      = "${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}"
 
 # APIM (leave empty to call AOAI directly)

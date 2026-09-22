@@ -39,6 +39,7 @@
 !/o1-assessment/frontend/assess-ux.py
 !/o1-assessment/frontend/azure_openai_client.py
 !/o1-assessment/frontend/auth.py
+!/o1-assessment/frontend/test_api_client_contract.py
 
 !/o1-assessment/frontend/static/
 !/o1-assessment/frontend/static/Ai-Grading.jpg
@@ -108,6 +109,8 @@
 !/wrappers/http-service/tests/test_auth.py
 !/wrappers/http-service/tests/test_smoke.py
 !/wrappers/http-service/tests/test_utils.py
+!/wrappers/http-service/tests/conftest.py
+!/wrappers/http-service/tests/test_reasoning_models.py
 !/wrappers/http-service/deploy/
 !/wrappers/http-service/deploy/**
 !/wrappers/http-service/supervisord.conf

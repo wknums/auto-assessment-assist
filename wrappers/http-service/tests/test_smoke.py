@@ -27,6 +27,7 @@ os.environ.setdefault("AZURE_OPENAI_ENDPOINT", "")     # not needed for smoke te
 os.environ.setdefault("LOG_LEVEL", "DEBUG")
 
 from app.main import app  # noqa: E402 – env must be set before import
+import app.api as api  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.request_tracker import remove_active_request, write_active_request  # noqa: E402
 
@@ -73,7 +74,11 @@ class TestAssessEndpoint:
         resp = client.post("/assess", json={})
         assert resp.status_code == 422
 
-    def test_minimal_json_body_validation(self, client: TestClient):
+    def test_minimal_json_body_validation(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         """POST /assess with a valid-shaped body but no real URIs.
 
         Depending on blob config this may return 400/500 – we just assert
@@ -86,6 +91,11 @@ class TestAssessEndpoint:
             "cvBlobUris": [],
             "numruns": 1,
         }
+
+        async def missing_test_blob(*_args, **_kwargs):
+            raise FileNotFoundError("Synthetic smoke-test blob is not available")
+
+        monkeypatch.setattr(api, "download_blob_to_path", missing_test_blob)
         resp = client.post("/assess", json=body)
         # We expect either a proper response or a problem+json error
         data = resp.json()

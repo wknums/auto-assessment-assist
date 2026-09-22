@@ -81,6 +81,12 @@ properties:
             value: "{{ AOAI_DEPLOYMENT }}"
           - name: AOAI_API_VERSION
             value: "{{ AOAI_API_VERSION }}"
+          - name: AZURE_OPENAI_DEPLOYMENT_REASON01
+            value: "{{ AZURE_OPENAI_DEPLOYMENT_REASON01 }}"
+          - name: AZURE_OPENAI_DEPLOYMENT_REASON02
+            value: "{{ AZURE_OPENAI_DEPLOYMENT_REASON02 }}"
+          - name: AZURE_OPENAI_DEPLOYMENT_REASON03
+            value: "{{ AZURE_OPENAI_DEPLOYMENT_REASON03 }}"
 
           - name: AZURE_TENANT_ID
             value: "{{ AZURE_TENANT_ID }}"

@@ -19,7 +19,7 @@
 #    bash deploy.sh build          # build & push only
 #    bash deploy.sh apply          # terraform apply only
 #    bash deploy.sh yaml           # deploy via ACA YAML (no Terraform)
-#    bash deploy.sh model          # update only the AOAI deployment
+#    bash deploy.sh model          # update only the reasoning deployments
 # ══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -738,7 +738,7 @@ print_banner() {
   echo "  App Name:   ${AZ_CONTAINER_APP_NAME}"
   echo "  Location:   ${AZ_LOCATION}"
   echo "  AOAI:       ${AZURE_OPENAI_ENDPOINT}"
-  echo "  Deployment: ${AZURE_OPENAI_DEPLOYMENT_O1}"
+  echo "  Default deployment: ${AZURE_OPENAI_DEPLOYMENT_REASON01}"
   echo "  Storage:    ${AZ_STORAGE_NAME} (REUSE=${AZ_STORAGE_REUSE:-FALSE})"
   echo "  AppInsig:   ${AZ_APPINSIGHTS_NAME:-<none>} (REUSE=${AZ_APPINSIGHTS_REUSE:-FALSE})"
   echo "  ACR REUSE:  ${AZ_ACR_REUSE:-FALSE}"
@@ -1126,7 +1126,9 @@ do_yaml() {
     -e "s|{{ ACTIVE_REQUEST_IDS_DIR }}|${ACTIVE_REQUEST_IDS_DIR:-}|g" \
     -e "s|{{ AZURE_OPENAI_ENDPOINT }}|${AZURE_OPENAI_ENDPOINT}|g" \
     -e "s|{{ APIM_AOAI_BASE_URL }}|${APIM_AOAI_BASE_URL:-}|g" \
-    -e "s|{{ AOAI_DEPLOYMENT }}|${AOAI_DEPLOYMENT:-${AZURE_OPENAI_DEPLOYMENT_O1}}|g" \
+    -e "s|{{ AZURE_OPENAI_DEPLOYMENT_REASON01 }}|${AZURE_OPENAI_DEPLOYMENT_REASON01}|g" \
+    -e "s|{{ AZURE_OPENAI_DEPLOYMENT_REASON02 }}|${AZURE_OPENAI_DEPLOYMENT_REASON02:-}|g" \
+    -e "s|{{ AZURE_OPENAI_DEPLOYMENT_REASON03 }}|${AZURE_OPENAI_DEPLOYMENT_REASON03:-}|g" \
     -e "s|{{ AOAI_API_VERSION }}|${AOAI_API_VERSION:-${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}}|g" \
     -e "s|{{ USE_AAD_FOR_AOAI }}|${USE_AAD_FOR_AOAI:-true}|g" \
     -e "s|{{ AUTH_MODE }}|${AUTH_MODE:-none}|g" \
@@ -1187,9 +1189,9 @@ do_yaml() {
 
 do_model() {
   local deployment
-  deployment="${AOAI_DEPLOYMENT:-${AZURE_OPENAI_DEPLOYMENT_O1:-}}"
+  deployment="${AZURE_OPENAI_DEPLOYMENT_REASON01:-}"
   if [[ -z "${deployment}" ]]; then
-    echo "ERROR: Set AZURE_OPENAI_DEPLOYMENT_O1 or AOAI_DEPLOYMENT in ${ENV_FILE}." >&2
+    echo "ERROR: Set AZURE_OPENAI_DEPLOYMENT_REASON01 in ${ENV_FILE}." >&2
     exit 1
   fi
 
@@ -1197,14 +1199,18 @@ do_model() {
   echo "── Updating Azure OpenAI deployment ────────────────────────"
   echo "  Container App: ${AZ_CONTAINER_APP_NAME}"
   echo "  Resource group: ${AZ_CONTAINER_APP_ENV_RG}"
-  echo "  Deployment: ${deployment}"
+  echo "  REASON01: ${deployment}"
+  echo "  REASON02: ${AZURE_OPENAI_DEPLOYMENT_REASON02:-<unset>}"
+  echo "  REASON03: ${AZURE_OPENAI_DEPLOYMENT_REASON03:-<unset>}"
 
   az containerapp update \
     --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
     --name "${AZ_CONTAINER_APP_NAME}" \
     --set-env-vars \
       "AOAI_DEPLOYMENT=${deployment}" \
-      "AZURE_OPENAI_DEPLOYMENT_O1=${deployment}"
+      "AZURE_OPENAI_DEPLOYMENT_REASON01=${deployment}" \
+      "AZURE_OPENAI_DEPLOYMENT_REASON02=${AZURE_OPENAI_DEPLOYMENT_REASON02:-}" \
+      "AZURE_OPENAI_DEPLOYMENT_REASON03=${AZURE_OPENAI_DEPLOYMENT_REASON03:-}"
 
   echo ""
   echo "✅ Azure OpenAI deployment updated."
@@ -1317,7 +1323,7 @@ do_preview() {
   echo ""
   echo "── Azure OpenAI ────────────────────────────────────────────"
   echo "  Endpoint:   ${AZURE_OPENAI_ENDPOINT}"
-  echo "  Deployment: ${AZURE_OPENAI_DEPLOYMENT_O1}"
+  echo "  Default deployment: ${AZURE_OPENAI_DEPLOYMENT_REASON01}"
   echo "  API Ver:    ${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}"
   echo "  Auth:       Managed Identity (USE_AAD_FOR_AOAI=true)"
 
@@ -1439,7 +1445,7 @@ case "$ACTION" in
     echo "  apply       Terraform apply (with confirmation)"
     echo "  applyforce  Terraform apply (no confirmation)"
     echo "  yaml        Deploy via ACA YAML manifest (no Terraform)"
-    echo "  model       Update only AOAI_DEPLOYMENT and AZURE_OPENAI_DEPLOYMENT_O1"
+    echo "  model       Update the configured reasoning model deployments"
     echo "  all         Full deploy: infra → build → apply"
     echo "  allforce    Full deploy: infra → build → apply (no confirmation)"
     exit 1

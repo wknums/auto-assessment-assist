@@ -7,6 +7,7 @@ Production-ready FastAPI wrapper around the **awreason** assessment engine, desi
 ```
 Client
   │
+  ├─ GET  /reasoning-models ─► list configured reasoning deployments and defaults
   ├─ POST /assess          ─► download inputs from Blob → run awreason N times → upload artifacts → return JSON
   ├─ POST /assess/upload   ─► multipart file uploads (same pipeline)
   ├─ GET  /assess/status/{requestId} ─► check if a request is actively processing on this replica
@@ -64,6 +65,8 @@ cp app/settings.sample.env .env
 At minimum set:
 - `WORKDIR_BASE` – a writable local path (e.g. `./work`)
 - `AZURE_OPENAI_ENDPOINT` and/or `APIM_AOAI_BASE_URL`
+- `AZURE_OPENAI_DEPLOYMENT_REASON01` – required default reasoning deployment
+- `AZURE_OPENAI_DEPLOYMENT_REASON02` / `REASON03` – optional additional deployments
 - `AZ_STORAGE_NAME` (or leave empty for local-only runs)
 
 ### 4. Run the server
@@ -249,7 +252,40 @@ To update only the Azure OpenAI deployment without reapplying the full manifest:
 DEPLOY_ENV_FILE=.env_qa bash deploy.sh model
 ```
 
-The `model` action updates both `AOAI_DEPLOYMENT` and `AZURE_OPENAI_DEPLOYMENT_O1` on the existing Container App.
+The `model` action updates `AOAI_DEPLOYMENT` plus
+`AZURE_OPENAI_DEPLOYMENT_REASON01`, `REASON02`, and `REASON03` on the
+existing Container App.
+
+## Reasoning models
+
+The service supports up to three configured reasoning deployments:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `AZURE_OPENAI_DEPLOYMENT_REASON01` | Yes | Default reasoning deployment |
+| `AZURE_OPENAI_DEPLOYMENT_REASON02` | No | Optional selectable deployment |
+| `AZURE_OPENAI_DEPLOYMENT_REASON03` | No | Optional selectable deployment |
+
+Discover the active configuration with:
+
+```bash
+curl https://<service>/reasoning-models
+```
+
+Assessment requests default to `REASON01` and `high` reasoning effort.
+Use `runProfile.reasoningModel` and `runProfile.reasoningEffort` for
+`POST /assess` and `POST /assess/upload`. For `POST /assess/passthrough`,
+send the multipart fields `reasoningModel` and `reasoningEffort`.
+
+Only deployment names returned by `GET /reasoning-models` are accepted.
+Supported effort values are `low`, `medium`, and `high`.
+
+The Streamlit **Advanced Options → Model Options** section consumes this
+contract in API mode and displays selectors for both the reasoning model and
+reasoning effort. In direct mode it builds the same options from
+`AZURE_OPENAI_DEPLOYMENT_REASON01/02/03`. The selected values are applied to
+single and batch assessments in both execution modes. Model options are shown
+as their actual Azure OpenAI deployment names.
 
 **Option B – Terraform only:**
 ```bash
