@@ -146,6 +146,19 @@ python -m pip install -r requirements.txt
 Copy-Item .env_sample .env
 ```
 
+To retrieve the supported reasoning-effort modes for each deployment configured
+in `AZURE_OPENAI_DEPLOYMENT_REASON01/02/03`, authenticate with Azure and run:
+
+```powershell
+az login
+python .\list_reasoning_efforts.py --env-file .env
+```
+
+The utility uses the same passwordless `DefaultAzureCredential` and Cognitive
+Services bearer-token scope as the engine code. It does not use API-key
+authentication or require additional packages. Its JSON output preserves the
+configured deployment order and lists effort modes from least to greatest.
+
 If PowerShell blocks activation scripts, allow them for the current terminal
 only and activate the environment again:
 

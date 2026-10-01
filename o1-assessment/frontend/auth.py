@@ -5,7 +5,8 @@ Azure Entra ID authentication for the Streamlit UX.
 
 Behaviour
 ---------
-- **Local development**: auth is skipped unless ``AUTH_MODE=entra``.
+- **Local development**: auth is skipped, even when deployment settings are
+  present in the environment.
 - **Azure Container Apps / App Service**:
   users must sign in with a Microsoft Entra ID account that belongs to
   the configured tenant.  The flow uses the OAuth 2.0 Authorization Code
@@ -31,20 +32,22 @@ from typing import Optional
 import streamlit as st
 
 # ── Detect Azure environment ──────────────────────────────────────────
-# Azure Container Apps and App Service inject WEBSITE_SITE_NAME.
-# When absent we assume local dev → skip auth.
-_RUNNING_ON_AZURE = bool(os.environ.get("WEBSITE_SITE_NAME")
-                         or os.environ.get("CONTAINER_APP_NAME"))
+# Azure Container Apps injects CONTAINER_APP_REVISION and App Service injects
+# WEBSITE_SITE_NAME. CONTAINER_APP_NAME and AUTH_MODE are deployment settings
+# that may also be loaded locally, so they are not reliable hosting signals.
 
 
 def is_running_on_azure() -> bool:
     """Return True when the app is hosted on Azure (ACA / App Service)."""
-    return _RUNNING_ON_AZURE
+    return bool(
+        os.environ.get("WEBSITE_SITE_NAME")
+        or os.environ.get("CONTAINER_APP_REVISION")
+    )
 
 
 def is_auth_enabled() -> bool:
     """Return True when Streamlit must authenticate the current user."""
-    return _RUNNING_ON_AZURE or os.environ.get("AUTH_MODE", "none").lower() == "entra"
+    return is_running_on_azure()
 
 
 def require_auth() -> Optional[dict]:
@@ -283,7 +286,7 @@ def _get_redirect_uri() -> str:
     else:
         host = os.environ.get("CONTAINER_APP_HOSTNAME", "localhost:8501")
 
-    scheme = "https" if _RUNNING_ON_AZURE else "http"
+    scheme = "https" if is_running_on_azure() else "http"
     return f"{scheme}://{host}/"
 
 

@@ -12,7 +12,13 @@ import uuid
 AGGREGATION_PROFILE_GENERIC = "generic_passthrough"
 AGGREGATION_PROFILE_CV = "cv_scoring_v1"
 AGGREGATION_PROFILE_PATTERN = "^(generic_passthrough|cv_scoring_v1)$"
-ReasoningEffort = Literal["low", "medium", "high"]
+ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
+SUPPORTED_REASONING_EFFORTS: tuple[ReasoningEffort, ...] = (
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -42,7 +48,7 @@ class RunProfile(BaseModel):
     reasoning_effort: ReasoningEffort = Field(
         "high",
         alias="reasoningEffort",
-        description="Reasoning effort: low, medium, or high.",
+        description="Reasoning effort: low, medium, high, or xhigh.",
     )
 
 
@@ -60,7 +66,7 @@ class ReasoningModelsResponse(BaseModel):
         "high", alias="defaultReasoningEffort"
     )
     supported_reasoning_efforts: List[ReasoningEffort] = Field(
-        default_factory=lambda: ["low", "medium", "high"],
+        default_factory=lambda: list(SUPPORTED_REASONING_EFFORTS),
         alias="supportedReasoningEfforts",
     )
     models: List[ReasoningModelInfo]

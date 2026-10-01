@@ -30,6 +30,7 @@ REASONING_DEPLOYMENT_ENV_VARS = (
     "AZURE_OPENAI_DEPLOYMENT_REASON03",
 )
 DEFAULT_REASONING_EFFORT = "high"
+SUPPORTED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 
 
 def get_configured_reasoning_models(environ=None):
@@ -87,7 +88,7 @@ def get_model_config(model_type, api_version, json_template=None, reasoning_effo
         model_type: 'o1' for O1/O3, 'gpt5' for GPT-5.1/5.2
         api_version: API version string
         json_template: Whether JSON structured output is requested
-        reasoning_effort: Reasoning effort level ("low", "medium", "high")
+        reasoning_effort: Reasoning effort level ("low", "medium", "high", "xhigh")
     
     Returns:
         Dictionary with model-specific parameters
@@ -439,9 +440,9 @@ def main():
     parser.add_argument(
         '--reasoning-effort',
         dest='reasoning_effort',
-        choices=['low', 'medium', 'high'],
+        choices=SUPPORTED_REASONING_EFFORTS,
         default=DEFAULT_REASONING_EFFORT,
-        help='Reasoning effort for supported O3 and GPT-5.x models (default: high)'
+        help='Reasoning effort for supported reasoning models (default: high)'
     )
     
     # Accept up to two PDF files (both must be files, not directories)

@@ -104,14 +104,14 @@ def test_run_profile_defaults_to_high_effort_and_accepts_aliases() -> None:
     override_profile = RunProfile.model_validate(
         {
             "reasoningModel": "reasoning-secondary",
-            "reasoningEffort": "low",
+            "reasoningEffort": "xhigh",
         }
     )
 
     assert default_profile.reasoning_model is None
     assert default_profile.reasoning_effort == "high"
     assert override_profile.reasoning_model == "reasoning-secondary"
-    assert override_profile.reasoning_effort == "low"
+    assert override_profile.reasoning_effort == "xhigh"
 
 
 def test_model_config_defaults_to_high_effort_and_accepts_override() -> None:
@@ -120,13 +120,13 @@ def test_model_config_defaults_to_high_effort_and_accepts_override() -> None:
         api_version="2025-03-01-preview",
     )
     override_config = awreason.get_model_config(
-        model_type="o1",
-        api_version="2024-12-01-preview",
-        reasoning_effort="medium",
+        model_type="gpt5",
+        api_version="2025-03-01-preview",
+        reasoning_effort="xhigh",
     )
 
     assert default_config["reasoning_param"]["reasoning"]["effort"] == "high"
-    assert override_config["reasoning_param"] == {"reasoning_effort": "medium"}
+    assert override_config["reasoning_param"]["reasoning"]["effort"] == "xhigh"
 
 
 def test_structured_output_keeps_requested_reasoning_effort() -> None:
@@ -153,13 +153,13 @@ def test_cli_args_include_explicit_model_and_effort(
     args = awreason_runner._build_cli_args(
         prompt_file=tmp_path / "prompt.txt",
         reasoning_model="reasoning-secondary",
-        reasoning_effort="medium",
+        reasoning_effort="xhigh",
         output_path=tmp_path / "output.json",
         tempdir=tmp_path,
     )
 
     assert args[args.index("--model") + 1] == "reasoning-secondary"
-    assert args[args.index("--reasoning-effort") + 1] == "medium"
+    assert args[args.index("--reasoning-effort") + 1] == "xhigh"
 
 
 def test_reasoning_models_route_lists_configured_models(
@@ -172,7 +172,7 @@ def test_reasoning_models_route_lists_configured_models(
     assert response.json() == {
         "defaultModel": "reasoning-primary",
         "defaultReasoningEffort": "high",
-        "supportedReasoningEfforts": ["low", "medium", "high"],
+        "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"],
         "models": [
             {
                 "slot": "reason01",
@@ -200,10 +200,10 @@ def test_reasoning_models_route_lists_configured_models(
         (
             {
                 "reasoningModel": "reasoning-secondary",
-                "reasoningEffort": "low",
+                "reasoningEffort": "xhigh",
             },
             "reasoning-secondary",
-            "low",
+            "xhigh",
         ),
     ],
 )
@@ -274,7 +274,7 @@ def test_upload_propagates_reasoning_selection(
         "numruns": 1,
         "runProfile": {
             "reasoningModel": "reasoning-tertiary",
-            "reasoningEffort": "medium",
+            "reasoningEffort": "xhigh",
         },
         "returnArtifacts": False,
     }
@@ -288,7 +288,7 @@ def test_upload_propagates_reasoning_selection(
 
     assert response.status_code == 200
     assert captured["reasoning_model"] == "reasoning-tertiary"
-    assert captured["reasoning_effort"] == "medium"
+    assert captured["reasoning_effort"] == "xhigh"
 
 
 def test_json_assess_propagates_default_reasoning_settings(

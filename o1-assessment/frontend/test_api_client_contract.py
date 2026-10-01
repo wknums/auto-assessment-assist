@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,63 @@ FRONTEND_DIR = Path(__file__).parent
 sys.path.insert(0, str(FRONTEND_DIR))
 
 import api_client  # noqa: E402
+import auth  # noqa: E402
+
+
+def test_local_development_skips_auth_with_deployment_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WEBSITE_SITE_NAME", raising=False)
+    monkeypatch.delenv("CONTAINER_APP_REVISION", raising=False)
+    monkeypatch.setenv("CONTAINER_APP_NAME", "awreason-streamlit")
+    monkeypatch.setenv("AUTH_MODE", "entra")
+
+    assert not auth.is_running_on_azure()
+    assert not auth.is_auth_enabled()
+    assert auth.require_auth() == {
+        "name": "Local Developer",
+        "preferred_username": "local@dev",
+    }
+
+
+@pytest.mark.parametrize("runtime_marker", ["WEBSITE_SITE_NAME", "CONTAINER_APP_REVISION"])
+def test_azure_runtime_enables_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_marker: str,
+) -> None:
+    monkeypatch.delenv("WEBSITE_SITE_NAME", raising=False)
+    monkeypatch.delenv("CONTAINER_APP_REVISION", raising=False)
+    monkeypatch.setenv(runtime_marker, "runtime-value")
+
+    assert auth.is_running_on_azure()
+    assert auth.is_auth_enabled()
+
+
+def test_streamlit_entrypoint_imports_api_client_from_another_working_directory(
+    tmp_path: Path,
+) -> None:
+    app_path = FRONTEND_DIR / "assess-ux.py"
+    code = (
+        "import runpy; "
+        f"state = runpy.run_path({str(app_path)!r}); "
+        "assert state['API_CLIENT_AVAILABLE']"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_streamlit_entrypoint_uses_current_width_api() -> None:
+    app_source = (FRONTEND_DIR / "assess-ux.py").read_text(encoding="utf-8")
+
+    assert "use_container_width" not in app_source
 
 
 class FakeResponse:
@@ -38,7 +96,7 @@ def reasoning_contract() -> dict[str, Any]:
     return {
         "defaultModel": "primary",
         "defaultReasoningEffort": "high",
-        "supportedReasoningEfforts": ["low", "medium", "high"],
+        "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"],
         "models": [
             {
                 "slot": "reason01",
@@ -143,7 +201,7 @@ def test_assessment_request_sends_selected_model_and_effort(
         prompt_file_path=str(prompt_path),
         pdf_files=[],
         reasoning_model="secondary",
-        reasoning_effort="medium",
+        reasoning_effort="xhigh",
         output_dir=str(tmp_path),
         endpoint="https://service.example",
     )
@@ -151,4 +209,4 @@ def test_assessment_request_sends_selected_model_and_effort(
     assert result is not None
     assert captured["url"] == "https://service.example/assess/passthrough"
     assert captured["data"]["reasoningModel"] == "secondary"
-    assert captured["data"]["reasoningEffort"] == "medium"
+    assert captured["data"]["reasoningEffort"] == "xhigh"

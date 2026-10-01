@@ -278,7 +278,7 @@ Use `runProfile.reasoningModel` and `runProfile.reasoningEffort` for
 send the multipart fields `reasoningModel` and `reasoningEffort`.
 
 Only deployment names returned by `GET /reasoning-models` are accepted.
-Supported effort values are `low`, `medium`, and `high`.
+Supported effort values are `low`, `medium`, `high`, and `xhigh`.
 
 The Streamlit **Advanced Options → Model Options** section consumes this
 contract in API mode and displays selectors for both the reasoning model and

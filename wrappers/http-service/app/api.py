@@ -37,6 +37,7 @@ from app.models import (
     RequestStatusResponse,
     RunProfile,
     SingleRunResult,
+    SUPPORTED_REASONING_EFFORTS,
     TimingsMs,
     TokenUsage,
 )
@@ -706,10 +707,16 @@ async def assess_passthrough(
                                         f"joinMode must be 'horizontal' or 'vertical', got '{join_mode}'",
                                         cid, request.url.path)
 
-                    if reasoning_effort not in ("low", "medium", "high"):
-                        return _problem(400, "Invalid reasoningEffort",
-                                        f"reasoningEffort must be 'low', 'medium', or 'high', got '{reasoning_effort}'",
-                                        cid, request.url.path)
+                    if reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
+                        supported_efforts = ", ".join(SUPPORTED_REASONING_EFFORTS)
+                        return _problem(
+                            400,
+                            "Invalid reasoningEffort",
+                            f"reasoningEffort must be one of {supported_efforts}, "
+                            f"got '{reasoning_effort}'",
+                            cid,
+                            request.url.path,
+                        )
 
                     try:
                         aggregation_profile = _validate_aggregation_profile(aggregation_profile)

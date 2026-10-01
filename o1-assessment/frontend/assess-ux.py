@@ -9,6 +9,19 @@ from pathlib import Path
 import base64
 import json
 from datetime import datetime
+from dotenv import load_dotenv
+
+CURRENT_FILE = Path(__file__).resolve()
+FRONTEND_DIR = CURRENT_FILE.parent
+REPO_ROOT = FRONTEND_DIR.parent
+O1_ASSESSMENT_DIR = REPO_ROOT
+STATIC_DIR = FRONTEND_DIR / "static"
+LOCAL_ENV_PATH = CURRENT_FILE.parents[2] / ".env"
+
+if str(FRONTEND_DIR) not in sys.path:
+    sys.path.insert(0, str(FRONTEND_DIR))
+
+load_dotenv(LOCAL_ENV_PATH, override=False)
 
 # Import authentication module
 from auth import require_auth, get_user_display, logout, is_auth_enabled
@@ -38,13 +51,6 @@ try:
 except ImportError as e:
     API_CLIENT_AVAILABLE = False
     print(f"Warning: API client not available: {e}")
-
-# Get the absolute path to the o1-assessment directory
-CURRENT_FILE = Path(__file__).resolve()
-FRONTEND_DIR = CURRENT_FILE.parent
-REPO_ROOT = FRONTEND_DIR.parent  # o1-assessment directory
-O1_ASSESSMENT_DIR = REPO_ROOT    # same as o1-assessment directory
-STATIC_DIR = FRONTEND_DIR / "static"  # Static assets directory
 
 # Writable base for results: use WORKDIR_BASE in containers, else local dir
 _WORKDIR_BASE = Path(os.environ.get("WORKDIR_BASE", ""))
@@ -170,7 +176,7 @@ def display_image(image_path, alt_text="AI Assessment Tool"):
     try:
         if os.path.exists(image_path):
             # If the image exists, display it
-            return st.image(image_path, caption=alt_text, use_container_width=True)
+            return st.image(image_path, caption=alt_text, width="stretch")
         else:
             # If the image doesn't exist, show a placeholder with the app name
             st.warning(f"Image file not found: {image_path}")
@@ -777,7 +783,7 @@ def main():
         with col2:
             # Folder browser button
             st.markdown("<br>", unsafe_allow_html=True)  # Add spacing to align with text input
-            if st.button("📁 Browse", use_container_width=True, key="browse_assessment_output"):
+            if st.button("📁 Browse", width="stretch", key="browse_assessment_output"):
                 st.session_state.show_assessment_folder_browser = True
         
         # Folder browser interface
@@ -793,7 +799,7 @@ def main():
                 
                 with nav_col1:
                     # Up one level button
-                    if st.button("⬆️ Up", use_container_width=True, key="assessment_nav_up"):
+                    if st.button("⬆️ Up", width="stretch", key="assessment_nav_up"):
                         parent_path = current_path.parent
                         if parent_path != current_path:  # Not at root
                             st.session_state.assessment_current_browse_path = str(parent_path)
@@ -801,7 +807,7 @@ def main():
                 
                 with nav_col2:
                     # Project folder button
-                    if st.button("📁 Project", use_container_width=True, key="assessment_nav_project"):
+                    if st.button("📁 Project", width="stretch", key="assessment_nav_project"):
                         st.session_state.assessment_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
                         st.rerun()
                 
@@ -837,7 +843,7 @@ def main():
                                     if i + j < len(dirs):
                                         folder = dirs[i + j]
                                         with col:
-                                            if st.button(f"📁 {folder.name}", use_container_width=True, key=f"assessment_folder_{i+j}"):
+                                            if st.button(f"📁 {folder.name}", width="stretch", key=f"assessment_folder_{i+j}"):
                                                 st.session_state.assessment_current_browse_path = str(folder)
                                                 st.rerun()
                         else:
@@ -859,7 +865,7 @@ def main():
                 action_col1, action_col2, action_col3 = st.columns(3)
                 
                 with action_col1:
-                    if st.button("✅ Select This Folder", use_container_width=True, key="assessment_select_folder"):
+                    if st.button("✅ Select This Folder", width="stretch", key="assessment_select_folder"):
                         st.session_state.assessment_output_directory = str(current_path)
                         st.session_state.show_assessment_folder_browser = False
                         st.success(f"✅ Selected: {current_path}")
@@ -867,11 +873,11 @@ def main():
                 
                 with action_col2:
                     # Manual path input
-                    if st.button("✏️ Enter Path Manually", use_container_width=True, key="assessment_manual_path"):
+                    if st.button("✏️ Enter Path Manually", width="stretch", key="assessment_manual_path"):
                         st.session_state.show_assessment_manual_input = True
                 
                 with action_col3:
-                    if st.button("❌ Cancel", use_container_width=True, key="assessment_cancel_browse"):
+                    if st.button("❌ Cancel", width="stretch", key="assessment_cancel_browse"):
                         st.session_state.show_assessment_folder_browser = False
                         st.rerun()
                 
@@ -887,7 +893,7 @@ def main():
                     
                     manual_col1, manual_col2 = st.columns(2)
                     with manual_col1:
-                        if st.button("✅ Use This Path", use_container_width=True, key="assessment_use_manual_path"):
+                        if st.button("✅ Use This Path", width="stretch", key="assessment_use_manual_path"):
                             if manual_path.strip():
                                 manual_path_obj = Path(manual_path.strip())
                                 if manual_path_obj.exists():
@@ -898,7 +904,7 @@ def main():
                                     st.rerun()
                                 else:
                                     # Ask if user wants to create the directory
-                                    if st.button("📁 Create & Use This Path", use_container_width=True, key="assessment_create_manual_path"):
+                                    if st.button("📁 Create & Use This Path", width="stretch", key="assessment_create_manual_path"):
                                         try:
                                             manual_path_obj.mkdir(parents=True, exist_ok=True)
                                             st.session_state.assessment_output_directory = str(manual_path_obj)
@@ -913,7 +919,7 @@ def main():
                                 st.error("Please enter a valid directory path")
                     
                     with manual_col2:
-                        if st.button("❌ Cancel Manual Entry", use_container_width=True, key="assessment_cancel_manual"):
+                        if st.button("❌ Cancel Manual Entry", width="stretch", key="assessment_cancel_manual"):
                             st.session_state.show_assessment_manual_input = False
                             st.rerun()
         
@@ -932,7 +938,7 @@ def main():
                 "🚀 Run Assessment",
                 disabled=run_button_disabled,
                 help="Start the assessment process",
-                use_container_width=True
+                width="stretch"
             )
         
     with tab2:
@@ -948,8 +954,6 @@ def main():
             horizontal=True,
         )
 
-        from dotenv import load_dotenv
-        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
         api_endpoint = os.environ.get("AWR_API_ENDPOINT", "http://127.0.0.1:8080")
 
         if execution_mode == "api":
@@ -970,19 +974,23 @@ def main():
 
         reasoning_contract = None
         reasoning_contract_error = None
-        if API_CLIENT_AVAILABLE:
-            try:
-                if execution_mode == "api":
+        if execution_mode == "api":
+            if API_CLIENT_AVAILABLE:
+                try:
                     reasoning_contract = get_reasoning_models(api_endpoint)
-                else:
-                    reasoning_contract = get_reasoning_models_from_environment()
-            except ReasoningModelsError as exc:
-                reasoning_contract_error = str(exc)
+                except ReasoningModelsError as exc:
+                    reasoning_contract_error = str(exc)
+            else:
+                reasoning_contract_error = (
+                    "Reasoning-model configuration cannot be loaded because the "
+                    "API client module is unavailable."
+                )
         else:
-            reasoning_contract_error = (
-                "Reasoning-model configuration cannot be loaded because the "
-                "API client module is unavailable."
-            )
+            if API_CLIENT_AVAILABLE:
+                try:
+                    reasoning_contract = get_reasoning_models_from_environment()
+                except ReasoningModelsError:
+                    pass
         
         st.markdown("---")
         
@@ -1009,7 +1017,36 @@ def main():
 
         model_column, effort_column = st.columns(2)
         with model_column:
-            if reasoning_contract:
+            if execution_mode == "direct":
+                default_model = (
+                    reasoning_contract["defaultModel"]
+                    if reasoning_contract
+                    else "AZURE_OPENAI_DEPLOYMENT_REASON01"
+                )
+                alternate_models = (
+                    [
+                        model["deployment"]
+                        for model in reasoning_contract["models"]
+                        if model["deployment"] != default_model
+                    ]
+                    if reasoning_contract
+                    else []
+                )
+                reasoning_model = st.selectbox(
+                    "Reasoning model",
+                    options=[None, *alternate_models],
+                    format_func=lambda model: (
+                        f"Default ({default_model})" if model is None else model
+                    ),
+                    help=(
+                        "The default lets awreason.py resolve "
+                        "AZURE_OPENAI_DEPLOYMENT_REASON01. Select an alternate "
+                        "configured deployment to override it."
+                    ),
+                    key="reasoning_model_direct",
+                )
+                st.caption(f"Default deployment: `{default_model}`")
+            elif reasoning_contract:
                 model_options = [
                     model["deployment"] for model in reasoning_contract["models"]
                 ]
@@ -1038,7 +1075,7 @@ def main():
             effort_options = (
                 reasoning_contract["supportedReasoningEfforts"]
                 if reasoning_contract
-                else ["low", "medium", "high"]
+                else ["low", "medium", "high", "xhigh"]
             )
             default_effort = (
                 reasoning_contract["defaultReasoningEffort"]
@@ -1052,7 +1089,9 @@ def main():
                 help="Controls reasoning effort for supported reasoning models.",
             )
 
-        reasoning_configuration_ready = reasoning_model is not None
+        reasoning_configuration_ready = (
+            execution_mode == "direct" or reasoning_model is not None
+        )
     
     with tab3:
         st.markdown("<h2 class='section-header'>Batch Document Processing</h2>", unsafe_allow_html=True)
@@ -1260,7 +1299,7 @@ def main():
         with col2:
             # Folder browser button
             st.markdown("<br>", unsafe_allow_html=True)  # Add spacing to align with text input
-            if st.button("📁 Browse", use_container_width=True, key="browse_batch_output"):
+            if st.button("📁 Browse", width="stretch", key="browse_batch_output"):
                 st.session_state.show_batch_folder_browser = True
         
         # Folder browser interface
@@ -1276,7 +1315,7 @@ def main():
                 
                 with nav_col1:
                     # Up one level button
-                    if st.button("⬆️ Up", use_container_width=True, key="batch_nav_up"):
+                    if st.button("⬆️ Up", width="stretch", key="batch_nav_up"):
                         parent_path = current_path.parent
                         if parent_path != current_path:  # Not at root
                             st.session_state.batch_current_browse_path = str(parent_path)
@@ -1284,7 +1323,7 @@ def main():
                 
                 with nav_col2:
                     # Project folder button
-                    if st.button("📁 Project", use_container_width=True, key="batch_nav_project"):
+                    if st.button("📁 Project", width="stretch", key="batch_nav_project"):
                         st.session_state.batch_current_browse_path = str(O1_ASSESSMENT_DIR.parent)
                         st.rerun()
                 
@@ -1320,7 +1359,7 @@ def main():
                                     if i + j < len(dirs):
                                         folder = dirs[i + j]
                                         with col:
-                                            if st.button(f"📁 {folder.name}", use_container_width=True, key=f"batch_folder_{i+j}"):
+                                            if st.button(f"📁 {folder.name}", width="stretch", key=f"batch_folder_{i+j}"):
                                                 st.session_state.batch_current_browse_path = str(folder)
                                                 st.rerun()
                         else:
@@ -1342,7 +1381,7 @@ def main():
                 action_col1, action_col2, action_col3 = st.columns(3)
                 
                 with action_col1:
-                    if st.button("✅ Select This Folder", use_container_width=True, key="batch_select_folder"):
+                    if st.button("✅ Select This Folder", width="stretch", key="batch_select_folder"):
                         st.session_state.batch_output_directory = str(current_path)
                         st.session_state.show_batch_folder_browser = False
                         st.success(f"✅ Selected: {current_path}")
@@ -1350,11 +1389,11 @@ def main():
                 
                 with action_col2:
                     # Manual path input
-                    if st.button("✏️ Enter Path Manually", use_container_width=True, key="batch_manual_path"):
+                    if st.button("✏️ Enter Path Manually", width="stretch", key="batch_manual_path"):
                         st.session_state.show_batch_manual_input = True
                 
                 with action_col3:
-                    if st.button("❌ Cancel", use_container_width=True, key="batch_cancel_browse"):
+                    if st.button("❌ Cancel", width="stretch", key="batch_cancel_browse"):
                         st.session_state.show_batch_folder_browser = False
                         st.rerun()
                 
@@ -1370,7 +1409,7 @@ def main():
                     
                     manual_col1, manual_col2 = st.columns(2)
                     with manual_col1:
-                        if st.button("✅ Use This Path", use_container_width=True, key="batch_use_manual_path"):
+                        if st.button("✅ Use This Path", width="stretch", key="batch_use_manual_path"):
                             if manual_path.strip():
                                 manual_path_obj = Path(manual_path.strip())
                                 if manual_path_obj.exists():
@@ -1381,7 +1420,7 @@ def main():
                                     st.rerun()
                                 else:
                                     # Ask if user wants to create the directory
-                                    if st.button("📁 Create & Use This Path", use_container_width=True, key="batch_create_manual_path"):
+                                    if st.button("📁 Create & Use This Path", width="stretch", key="batch_create_manual_path"):
                                         try:
                                             manual_path_obj.mkdir(parents=True, exist_ok=True)
                                             st.session_state.batch_output_directory = str(manual_path_obj)
@@ -1396,7 +1435,7 @@ def main():
                                 st.error("Please enter a valid directory path")
                     
                     with manual_col2:
-                        if st.button("❌ Cancel Manual Entry", use_container_width=True, key="batch_cancel_manual"):
+                        if st.button("❌ Cancel Manual Entry", width="stretch", key="batch_cancel_manual"):
                             st.session_state.show_batch_manual_input = False
                             st.rerun()
         
@@ -1429,12 +1468,12 @@ def main():
                 "🚀 Run Batch Processing",
                 disabled=batch_run_disabled,
                 help="Process all uploaded .docx files",
-                use_container_width=True,
+                width="stretch",
                 key="run_batch_button"
             )
         with batch_col2:
             if 'batch_results' in st.session_state and st.session_state.batch_results:
-                if st.button("📊 View Results", use_container_width=True, key="view_batch_results"):
+                if st.button("📊 View Results", width="stretch", key="view_batch_results"):
                     st.session_state.show_batch_results = True
         
         # Process batch if button clicked
@@ -1594,8 +1633,6 @@ def main():
 
                             # ── API mode: send to the AWReason HTTP service ──
                             if execution_mode == "api" and API_CLIENT_AVAILABLE:
-                                from dotenv import load_dotenv
-                                load_dotenv(Path(__file__).resolve().parents[2] / ".env")
                                 _api_ep = os.environ.get("AWR_API_ENDPOINT", "http://127.0.0.1:8080")
 
                                 # Build file lists for API call
@@ -2491,11 +2528,11 @@ def main():
             
             clear_col1, clear_col2 = st.columns(2)
             with clear_col1:
-                if st.button("🗑️ Clear Chat History", use_container_width=True):
+                if st.button("🗑️ Clear Chat History", width="stretch"):
                     st.session_state.chat_history = []
                     st.rerun()
             with clear_col2:
-                if st.button("🔄 Clear Assessment Result", use_container_width=True, 
+                if st.button("🔄 Clear Assessment Result", width="stretch",
                            disabled=not st.session_state.chat_base_context.get('assessment_result')):
                     st.session_state.chat_base_context['assessment_result'] = None
                     st.success("Assessment result cleared from chat context")
@@ -2526,7 +2563,7 @@ def main():
                 label_visibility="collapsed"
             )
         with chat_col2:
-            send_button = st.button("Send 📨", use_container_width=True)
+            send_button = st.button("Send 📨", width="stretch")
         
         # Handle message sending
         if send_button and user_message:
@@ -2542,29 +2579,29 @@ def main():
             quick_col1, quick_col2, quick_col3, quick_col4 = st.columns(4)
             
             with quick_col1:
-                if st.button("📊 Summarize Results", use_container_width=True):
+                if st.button("📊 Summarize Results", width="stretch"):
                     send_chat_message("Please provide a concise summary of the assessment results.")
                     st.rerun()
             
             with quick_col2:
-                if st.button("🎯 Key Findings", use_container_width=True):
+                if st.button("🎯 Key Findings", width="stretch"):
                     send_chat_message("What are the key findings and main points from this assessment?")
                     st.rerun()
             
             with quick_col3:
-                if st.button("⚠️ Areas of Concern", use_container_width=True):
+                if st.button("⚠️ Areas of Concern", width="stretch"):
                     send_chat_message("Identify any areas of concern or issues highlighted in the assessment.")
                     st.rerun()
             
             with quick_col4:
-                if st.button("✨ Strengths", use_container_width=True):
+                if st.button("✨ Strengths", width="stretch"):
                     send_chat_message("What are the main strengths identified in this assessment?")
                     st.rerun()
         else:
             quick_col1, quick_col2, quick_col3 = st.columns(3)
             
             with quick_col1:
-                if st.button("💡 Summarize Prompt", use_container_width=True):
+                if st.button("💡 Summarize Prompt", width="stretch"):
                     if st.session_state.chat_base_context['prompt_content']:
                         send_chat_message("Please summarize the assessment prompt that was uploaded.")
                         st.rerun()
@@ -2572,7 +2609,7 @@ def main():
                         st.warning("No prompt file uploaded yet")
             
             with quick_col2:
-                if st.button("📋 Extract Criteria", use_container_width=True):
+                if st.button("📋 Extract Criteria", width="stretch"):
                     if st.session_state.chat_base_context['prompt_content']:
                         send_chat_message("Extract and list the key grading criteria from the assessment prompt.")
                         st.rerun()
@@ -2580,7 +2617,7 @@ def main():
                         st.warning("No prompt file uploaded yet")
             
             with quick_col3:
-                if st.button("❓ Help with Setup", use_container_width=True):
+                if st.button("❓ Help with Setup", width="stretch"):
                     send_chat_message("What information do I need to provide to run an assessment?")
                     st.rerun()
     
@@ -2716,8 +2753,6 @@ def main():
             # Run the assessment (direct or API mode)
             if execution_mode == "api" and API_CLIENT_AVAILABLE:
                 # API mode: call the AWReason HTTP service
-                from dotenv import load_dotenv
-                load_dotenv(Path(__file__).resolve().parents[2] / ".env")
                 api_endpoint = os.environ.get("AWR_API_ENDPOINT", "http://127.0.0.1:8080")
                 console_output += f"Using API mode: {api_endpoint}\n"
                 console_placeholder.markdown(f'<div class="console-output">{console_output}</div>', unsafe_allow_html=True)

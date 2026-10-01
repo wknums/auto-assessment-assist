@@ -21,10 +21,12 @@
 !/run_awreason_ux.ps1
 !/run_awreason_ux.sh
 
+
 # Unignore browser integration tests
 !/tests/
 !/tests/e2e/
 /tests/e2e/test_streamlit_awreason.py
+
 
 # Unignore specific files in experiments directory
 ##!/experiments/utils/
@@ -37,6 +39,7 @@
 # Unignore frontend  directory
 !/o1-assessment/frontend/
 !/o1-assessment/frontend/assess-ux.py
+!/o1-assessment/frontend/api_client.py
 !/o1-assessment/frontend/azure_openai_client.py
 !/o1-assessment/frontend/auth.py
 !/o1-assessment/frontend/test_api_client_contract.py
