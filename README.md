@@ -176,9 +176,12 @@ python -m pip install -r requirements.txt
 cp .env_sample .env
 ```
 
-Create or obtain access to an Azure AI Foundry project with an Azure OpenAI
-model deployment. Use the chat playground to verify the deployment before
-continuing. The provided deployment scripts do not create Azure OpenAI.
+You need a Microsoft Foundry resource, a project, and a model deployment, and
+your Azure account needs an inference role on that resource. If you do not have
+these yet, follow
+[Create a Foundry resource, project, and model deployment](#create-a-foundry-resource-project-and-model-deployment-azure-portal)
+below. The provided deployment scripts do not create Azure OpenAI or Foundry
+resources.
 
 Edit `.env` and set at least `AZURE_OPENAI_ENDPOINT`,
 `AZURE_OPENAI_DEPLOYMENT_REASON01`, and `AZURE_OPENAI_API_VERSION`. When using
@@ -191,8 +194,113 @@ az account set --subscription <subscription-id>
 az account show --query "{subscription:name,subscriptionId:id,tenantId:tenantId}" --output table
 ```
 
-The signed-in local developer needs **Cognitive Services OpenAI User** on the
-Azure OpenAI resource when using Microsoft Entra authentication.
+The signed-in local developer needs **Foundry User** or **Cognitive Services
+User** on the Foundry resource when using Microsoft Entra authentication (see
+the next section). Owner and Contributor do not grant model inference access.
+
+#### Create a Foundry resource, project, and model deployment (Azure portal)
+
+Skip this section if you already have a Foundry resource with a deployed model
+and have been granted access to it. Otherwise follow these steps once per
+environment.
+
+**You need:** an Azure subscription, permission to create resources in a
+resource group (Contributor or Owner), and permission to assign roles (Owner,
+User Access Administrator, or Role Based Access Control Administrator) to
+grant access to other users. If you are not allowed to assign roles, ask an
+administrator to complete step 4 for you.
+
+**1. Create the Foundry resource**
+
+1. Sign in to the [Azure portal](https://portal.azure.com) and make sure the
+   correct directory (tenant) is selected under **Settings** >
+   **Directories + subscriptions**.
+2. Open [Create a Foundry resource](https://portal.azure.com/#create/Microsoft.CognitiveServicesAIFoundry),
+   or search for **Foundry** in **Create a resource**.
+3. On the **Basics** tab enter:
+   - **Subscription**: the subscription that will pay for usage.
+   - **Resource group**: create a new one (for example `rg-awreason`) so all
+     resources can be managed and deleted together.
+   - **Region**: a region where your chosen reasoning model is available.
+     Check model availability and quota before choosing.
+   - **Name**: a globally unique name. It becomes part of the endpoint
+     (`https://<name>.cognitiveservices.azure.com/`).
+   - **Default project name**, if shown: accept it or enter a name.
+4. Keep the defaults on the remaining tabs unless your organization requires
+   private networking, and select **Review + create**, then **Create**.
+5. When deployment finishes, select **Go to resource**.
+
+**2. Create a project**
+
+If the resource page shows a default project, you can use it. Otherwise:
+
+1. Select **Go to Foundry portal** on the resource's **Overview** page, or open
+   [ai.azure.com](https://ai.azure.com) and make sure the **New Foundry**
+   toggle is on.
+2. Select the project name in the upper-left corner, then **Create new
+   project**.
+3. Enter a project name, open **Advanced options**, select the **Foundry
+   resource** you just created, and select **Create project**.
+
+**3. Deploy a model**
+
+1. In the Foundry portal, select **Discover** > **Models**.
+2. Search for the reasoning model you want to use (for example `o3` or
+   `gpt-5`) and select **Deploy** > **Custom settings** if you need a specific
+   deployment name, SKU, or capacity (otherwise **Default settings**).
+3. Note the **deployment name**. This is the value for
+   `AZURE_OPENAI_DEPLOYMENT_REASON01` in `.env`, not the model name.
+4. Select the deployment's **Open in playground** and send a test prompt to
+   confirm it works.
+
+If the model you want is not listed or deployment fails with a quota error,
+select a different region or SKU, or request quota under **Management center**
+> **Quota** in the Foundry portal.
+
+**4. Assign the required role to every user or service that calls the model**
+
+Signing in with `az login` is not enough. Microsoft Entra authentication needs a
+role assignment with inference data permissions on the Foundry resource.
+
+1. In the Azure portal, open the Foundry resource.
+2. Select **Access control (IAM)**.
+3. Select **Add** > **Add role assignment**.
+4. On the **Role** tab, select **Foundry User** (previously named *Azure AI
+   User*) and select **Next**. **Cognitive Services User** also works. Do not
+   use **Cognitive Services OpenAI User**, which covers only classic Azure
+   OpenAI resources.
+5. On the **Members** tab, set **Assign access to** to **User, group, or
+   service principal**, choose **Select members**, search for the user or
+   group, and select them.
+6. Select **Review + assign** twice.
+7. Wait at least five minutes before the first call.
+
+Assign the role to a security group when several people need access. For the
+Container Apps deployment, the deployment scripts assign only **Cognitive
+Services OpenAI User** to the runtime managed identity. For a Foundry resource,
+also assign **Foundry User** to that managed identity using the same steps
+(select **Managed identity** under **Assign access to**).
+
+**Verify access**
+
+Check which account the CLI uses; the tenant and user must match the account
+that holds the role:
+
+```powershell
+az login --tenant <tenant-id>
+az account show --query "{user:user.name,tenant:tenantId,subscription:id}" --output json
+```
+
+Then copy the endpoint from the resource's **Resource Management** >
+**Keys and Endpoint** page into `AZURE_OPENAI_ENDPOINT` and run
+`python .\list_reasoning_efforts.py --env-file .env`. A
+`401 PermissionDenied: Principal does not have access to API/Operation` error
+means the role is missing, was assigned to a different account or tenant, or
+has not propagated yet. For key-less sign-in, leave `AZURE_OPENAI_API_KEY`
+empty.
+
+Reference: [Quickstart: Set up Microsoft Foundry resources](https://learn.microsoft.com/azure/foundry/tutorials/quickstart-create-foundry-resources)
+and [Configure keyless authentication with Microsoft Entra ID](https://learn.microsoft.com/azure/foundry/foundry-models/how-to/configure-entra-id#troubleshooting).
 
 ## HTTP Service Deployment to a New Azure Subscription
 
@@ -522,6 +630,7 @@ The accelerator supports two authentication methods for Azure OpenAI:
 - Comment out or remove `AZURE_OPENAI_API_KEY` from your `.env` file
 - Set `AZURE_TENANT_ID` and optionally `AZURE_SUBSCRIPTION_ID` in your `.env` file
 - Authenticate using Azure CLI: `az login --tenant <your-tenant-id>`
+- The signed-in account also needs **Foundry User** or **Cognitive Services User** on the Foundry resource; `az login` alone is not enough (see [Create a Foundry resource, project, and model deployment](#create-a-foundry-resource-project-and-model-deployment-azure-portal))
 - The code uses `DefaultAzureCredential` which tries multiple authentication methods (Azure CLI, PowerShell, VS Code, etc.)
 - Required for environments with security policies that prohibit API key usage
 

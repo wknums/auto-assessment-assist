@@ -12,6 +12,66 @@ sys.path.insert(0, str(FRONTEND_DIR))
 
 import api_client  # noqa: E402
 import auth  # noqa: E402
+import azure_openai_client  # noqa: E402
+
+
+def test_azure_authentication_accepts_configured_api_key() -> None:
+    def unexpected_credential():
+        raise AssertionError("Credential factory should not be used with an API key")
+
+    result = azure_openai_client.test_azure_authentication(
+        {"AZURE_OPENAI_API_KEY": "configured"},
+        credential_factory=unexpected_credential,
+    )
+
+    assert result.authenticated
+    assert result.method == "api-key"
+
+
+def test_azure_authentication_acquires_cognitive_services_token() -> None:
+    class FakeCredential:
+        closed = False
+
+        def get_token(self, scope: str):
+            assert scope == azure_openai_client.AZURE_OPENAI_SCOPE
+            return object()
+
+        def close(self) -> None:
+            self.closed = True
+
+    credential = FakeCredential()
+    result = azure_openai_client.test_azure_authentication(
+        {},
+        credential_factory=lambda: credential,
+    )
+
+    assert result.authenticated
+    assert result.method == "entra-id"
+    assert credential.closed
+
+
+def test_azure_authentication_returns_actionable_login_guidance() -> None:
+    class MissingCredential:
+        def get_token(self, _scope: str):
+            raise azure_openai_client.CredentialUnavailableError("not logged in")
+
+    result = azure_openai_client.test_azure_authentication(
+        {},
+        credential_factory=MissingCredential,
+    )
+
+    assert not result.authenticated
+    assert "`az login`" in result.message
+    assert "`az account show`" in result.message
+
+
+def test_azure_authentication_error_detection_matches_credential_chain() -> None:
+    assert azure_openai_client.is_azure_authentication_error(
+        "DefaultAzureCredential failed to retrieve a token"
+    )
+    assert not azure_openai_client.is_azure_authentication_error(
+        "The Azure OpenAI deployment was not found"
+    )
 
 
 def test_local_development_skips_auth_with_deployment_settings(

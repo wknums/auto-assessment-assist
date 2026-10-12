@@ -7,10 +7,97 @@ Provides reusable functions for initializing the Azure OpenAI client and sending
 """
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Mapping, Protocol
+
 from openai import AzureOpenAI
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from azure.core.exceptions import ClientAuthenticationError
+from azure.identity import (
+    CredentialUnavailableError,
+    DefaultAzureCredential,
+    get_bearer_token_provider,
+)
 from dotenv import load_dotenv
+
+AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default"
+AZURE_AUTH_ERROR_MARKERS = (
+    "defaultazurecredential failed",
+    "credentialunavailableerror",
+    "clientauthenticationerror",
+    "azure cli not found",
+    "az login",
+    "not logged in",
+)
+
+
+@dataclass(frozen=True)
+class AzureAuthenticationResult:
+    authenticated: bool
+    method: str
+    message: str
+
+
+class TokenCredential(Protocol):
+    def get_token(self, *scopes: str) -> object:
+        """Acquire an access token for the requested scopes."""
+
+
+def azure_authentication_guidance() -> str:
+    """Return actionable local authentication guidance."""
+    return (
+        "Azure authentication failed. Run `az login` in a terminal "
+        "(`az login --tenant <tenant-id>` when AZURE_TENANT_ID is configured), "
+        "confirm the active account with `az account show`, then run the "
+        "authentication test again. The account also needs the Cognitive "
+        "Services OpenAI User role on the Azure OpenAI resource."
+    )
+
+
+def is_azure_authentication_error(message: str) -> bool:
+    """Return whether an error contains a known Azure credential failure."""
+    normalized = message.lower()
+    return any(marker in normalized for marker in AZURE_AUTH_ERROR_MARKERS)
+
+
+def test_azure_authentication(
+    environ: Mapping[str, str] | None = None,
+    credential_factory: Callable[[], TokenCredential] = DefaultAzureCredential,
+) -> AzureAuthenticationResult:
+    """Verify that direct mode can authenticate before an assessment starts."""
+    environ = environ if environ is not None else os.environ
+    if environ.get("AZURE_OPENAI_API_KEY", "").strip():
+        return AzureAuthenticationResult(
+            authenticated=True,
+            method="api-key",
+            message=(
+                "AZURE_OPENAI_API_KEY is configured. Direct mode will use the "
+                "API key, so an Azure CLI sign-in is not required."
+            ),
+        )
+
+    credential = credential_factory()
+    try:
+        credential.get_token(AZURE_OPENAI_SCOPE)
+    except (CredentialUnavailableError, ClientAuthenticationError):
+        return AzureAuthenticationResult(
+            authenticated=False,
+            method="entra-id",
+            message=azure_authentication_guidance(),
+        )
+    finally:
+        close = getattr(credential, "close", None)
+        if callable(close):
+            close()
+
+    return AzureAuthenticationResult(
+        authenticated=True,
+        method="entra-id",
+        message=(
+            "Azure authentication succeeded. A token was acquired for Azure "
+            "Cognitive Services."
+        ),
+    )
 
 
 def initialize_azure_openai_client():
@@ -39,10 +126,9 @@ def initialize_azure_openai_client():
         )
     
     # Initialize with Entra ID authentication
-    cognitiveServicesResource = "https://cognitiveservices.azure.com/"
     token_provider = get_bearer_token_provider(
         DefaultAzureCredential(),
-        f'{cognitiveServicesResource}.default'
+        AZURE_OPENAI_SCOPE,
     )
     
     client = AzureOpenAI(
@@ -102,6 +188,8 @@ def send_chat_completion(client, messages, deployment=None, max_tokens=4000, tem
         
         return response_content, usage_info
         
+    except (CredentialUnavailableError, ClientAuthenticationError) as exc:
+        raise RuntimeError(azure_authentication_guidance()) from exc
     except Exception as e:
         # Re-raise with more context
         raise Exception(f"Azure OpenAI API call failed: {str(e)}")

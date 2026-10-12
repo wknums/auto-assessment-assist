@@ -29,8 +29,11 @@ from auth import require_auth, get_user_display, logout, is_auth_enabled
 # Import Azure OpenAI client utilities
 try:
     from azure_openai_client import (
+        azure_authentication_guidance,
         initialize_azure_openai_client,
+        is_azure_authentication_error,
         send_chat_completion,
+        test_azure_authentication,
         truncate_context_to_fit
     )
     AZURE_OPENAI_AVAILABLE = True
@@ -326,7 +329,14 @@ def run_assessment(prompt_file_path, pdf_files, join_option, json_template_path,
         # Check for errors
         _, stderr = process.communicate()
         if process.returncode != 0:
-            error_msg = f"Error running assessment: {stderr}"
+            if (
+                AZURE_OPENAI_AVAILABLE
+                and is_azure_authentication_error(stderr)
+            ):
+                error_msg = azure_authentication_guidance()
+                console_output += f"\nAzure credential details:\n{stderr}\n"
+            else:
+                error_msg = f"Error running assessment: {stderr}"
             status_placeholder.error(error_msg)
             console_output += f"\n{error_msg}\n"
             console_placeholder.markdown(f'<div class="console-output">{console_output}</div>', unsafe_allow_html=True)
@@ -971,6 +981,44 @@ def main():
                         st.warning(f"API is alive but NOT ready: {'; '.join(health['errors'])}")
                     else:
                         st.error(f"API is not reachable: {'; '.join(health['errors'])}")
+        else:
+            st.subheader("Azure Authentication")
+            st.caption(
+                "Direct mode uses AZURE_OPENAI_API_KEY when configured; "
+                "otherwise it uses your local Azure identity."
+            )
+            if st.button("Test Azure Authentication", key="test_azure_authentication"):
+                if not AZURE_OPENAI_AVAILABLE:
+                    st.session_state.azure_auth_test = {
+                        "authenticated": False,
+                        "message": (
+                            "The Azure OpenAI client module could not be loaded. "
+                            "Install the dependencies from requirements.txt first."
+                        ),
+                    }
+                else:
+                    with st.spinner("Testing Azure authentication..."):
+                        try:
+                            auth_result = test_azure_authentication()
+                            st.session_state.azure_auth_test = {
+                                "authenticated": auth_result.authenticated,
+                                "message": auth_result.message,
+                            }
+                        except Exception as exc:
+                            st.session_state.azure_auth_test = {
+                                "authenticated": False,
+                                "message": (
+                                    "The Azure authentication test could not be "
+                                    f"completed: {exc}"
+                                ),
+                            }
+
+            auth_test = st.session_state.get("azure_auth_test")
+            if auth_test:
+                if auth_test["authenticated"]:
+                    st.success(auth_test["message"])
+                else:
+                    st.error(auth_test["message"])
 
         reasoning_contract = None
         reasoning_contract_error = None
@@ -1882,6 +1930,10 @@ def main():
                                 # Determine error reason from the collected output
                                 error_output = last_error_output
                                 error_lower = error_output.lower()
+                                azure_authentication_failed = (
+                                    AZURE_OPENAI_AVAILABLE
+                                    and is_azure_authentication_error(error_output)
+                                )
                                 
                                 if any(pattern in error_lower for pattern in ["429", "rate limit", "too many requests"]):
                                     error_reason = f"Rate limiting error after {max_retries} retries"
@@ -1897,8 +1949,8 @@ def main():
                                     error_reason = "Permission denied"
                                 elif "openai" in error_lower and "api" in error_lower:
                                     error_reason = "OpenAI API error"
-                                elif "authentication" in error_lower or "unauthorized" in error_lower:
-                                    error_reason = "Authentication error"
+                                elif azure_authentication_failed or "unauthorized" in error_lower:
+                                    error_reason = "Azure authentication failed"
                                 elif "quota" in error_lower or "billing" in error_lower:
                                     error_reason = "Quota/Billing error"
                                 else:
@@ -1911,6 +1963,10 @@ def main():
                                     error_msg += "\\n"
                                 error_msg += f"Reason: {error_reason}\\n"
                                 error_msg += f"Attempts: {retry_count + 1}\\n"
+                                if azure_authentication_failed:
+                                    error_msg += (
+                                        f"How to fix: {azure_authentication_guidance()}\\n"
+                                    )
                                 error_msg += f"Details: {error_output[:500]}...\\n" if len(error_output) > 500 else f"Details: {error_output}\\n"
                                 
                                 console_log += error_msg
@@ -2489,10 +2545,10 @@ def main():
         
         # Show Azure OpenAI connection status
         if st.session_state.azure_openai_client:
-            st.success("✅ Connected to Azure OpenAI")
+            st.success("✅ Azure OpenAI client configured")
         else:
             st.error(f"❌ Azure OpenAI not available: {st.session_state.client_error}")
-            st.info("💡 Make sure your .env file is configured with AZURE_OPENAI_ENDPOINT and you're authenticated with Azure CLI (`az login`)")
+            st.info(azure_authentication_guidance())
         
         # Chat configuration
         with st.expander("⚙️ Chat Configuration", expanded=False):
