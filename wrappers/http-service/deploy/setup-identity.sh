@@ -70,11 +70,11 @@ API_SCOPE_ID="${AAD_API_SCOPE_ID:-3d5295a4-2b81-4f8f-97db-dbef9b59f127}"
 API_APP_ROLE_ID="${AAD_API_APP_ROLE_ID:-7f26b10f-f15a-4f0f-b4e0-5a053e1b7611}"
 LOCATION="${AZ_LOCATION:-swedencentral}"
 
-if [[ ("$ACTION" == "mi" || "$ACTION" == "all") && -z "${AZ_CONTAINER_APP_ENV_RG:-}" ]]; then
-  echo "ERROR: AZ_CONTAINER_APP_ENV_RG is not set in $ENV_FILE" >&2
+if [[ ("$ACTION" == "mi" || "$ACTION" == "all") && -z "${AZ_MI_RG:-${AZ_CONTAINER_APP_ENV_RG:-}}" ]]; then
+  echo "ERROR: Set AZ_MI_RG or AZ_CONTAINER_APP_ENV_RG in $ENV_FILE" >&2
   exit 1
 fi
-MI_RG="${AZ_CONTAINER_APP_ENV_RG:-}"
+MI_RG="${AZ_MI_RG:-${AZ_CONTAINER_APP_ENV_RG:-}}"
 
 # ── Set active subscription so all az commands target the right one ───
 if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
@@ -188,6 +188,36 @@ flush_env_vars() {
 #  Managed Identity + Role Assignments
 # ══════════════════════════════════════════════════════════════════════
 
+ensure_identity_role_assignment() {
+  local principal_id="$1" role="$2" scope="$3" target="$4"
+
+  if az role assignment list \
+      --assignee "$principal_id" \
+      --scope "$scope" \
+      --role "$role" \
+      --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' | grep -q .; then
+    if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+      echo "  ✅ Existing $role assignment verified on $target."
+    else
+      echo "  Role already assigned."
+    fi
+    return
+  fi
+
+  if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+    echo "ERROR: Required $role assignment was not found on $target while AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE." >&2
+    return 1
+  fi
+
+  az role assignment create \
+    --assignee-object-id "$principal_id" \
+    --assignee-principal-type ServicePrincipal \
+    --role "$role" \
+    --scope "$scope" \
+    -o none
+  echo "  ✅ $role assigned on $target"
+}
+
 setup_managed_identity() {
   echo ""
   echo "═══════════════════════════════════════════════════════════"
@@ -195,6 +225,11 @@ setup_managed_identity() {
   echo "═══════════════════════════════════════════════════════════"
 
   local mi_principal_id mi_client_id mi_resource_id
+
+  if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE && ! is_reuse AZ_IDENTITIES_REUSE; then
+    echo "ERROR: AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE requires AZ_IDENTITIES_REUSE=TRUE." >&2
+    return 1
+  fi
 
   if is_reuse AZ_IDENTITIES_REUSE; then
     echo "  AZ_IDENTITIES_REUSE=TRUE → using existing MI."
@@ -207,11 +242,14 @@ setup_managed_identity() {
     fi
     mi_principal_id=$(az identity show --name "$MI_NAME" --resource-group "$MI_RG" --query principalId -o tsv | tr -d '\r')
     mi_client_id=$(az identity show --name "$MI_NAME" --resource-group "$MI_RG" --query clientId -o tsv | tr -d '\r')
+    mi_resource_id=$(az identity show --name "$MI_NAME" --resource-group "$MI_RG" --query id -o tsv | tr -d '\r')
     echo "  MI principal: $mi_principal_id"
     echo "  MI client:    $mi_client_id"
     stage_env_var "AZ_MI_NAME" "$MI_NAME"
+    stage_env_var "AZ_MI_RG" "$MI_RG"
     stage_env_var "AZ_MI_PRINCIPAL_ID" "$mi_principal_id"
     stage_env_var "AZ_MI_CLIENT_ID" "$mi_client_id"
+    stage_env_var "AZ_MI_RESOURCE_ID" "$mi_resource_id"
   else
     # ── Create MI ───────────────────────────────────────────────────────
     echo ""
@@ -236,6 +274,7 @@ setup_managed_identity() {
     echo "  Client ID:    $mi_client_id"
 
     stage_env_var "AZ_MI_NAME" "$MI_NAME"
+    stage_env_var "AZ_MI_RG" "$MI_RG"
     stage_env_var "AZ_MI_PRINCIPAL_ID" "$mi_principal_id"
     stage_env_var "AZ_MI_CLIENT_ID" "$mi_client_id"
     stage_env_var "AZ_MI_RESOURCE_ID" "$mi_resource_id"
@@ -246,6 +285,10 @@ setup_managed_identity() {
   echo "── Role Assignment: Storage Blob Data Contributor ──────────"
 
   if [[ -z "${AZ_STORAGE_NAME:-}" ]]; then
+    if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+      echo "ERROR: AZ_STORAGE_NAME is required when AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE." >&2
+      return 1
+    fi
     echo "  ⚠️  AZ_STORAGE_NAME not set – skipping storage role."
   else
     local storage_id
@@ -256,23 +299,17 @@ setup_managed_identity() {
     storage_id="${storage_id:-}"
 
     if [[ -z "$storage_id" ]]; then
+      if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+        echo "ERROR: Storage account '$AZ_STORAGE_NAME' was not found while AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE." >&2
+        return 1
+      fi
       echo "  ⚠️  Storage account '$AZ_STORAGE_NAME' not found – skipping."
     else
-      if az role assignment list \
-          --assignee "$mi_principal_id" \
-          --scope "$storage_id" \
-          --role "Storage Blob Data Contributor" \
-          --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' | grep -q .; then
-        echo "  Role already assigned."
-      else
-        az role assignment create \
-          --assignee-object-id "$mi_principal_id" \
-          --assignee-principal-type ServicePrincipal \
-          --role "Storage Blob Data Contributor" \
-          --scope "$storage_id" \
-          -o none
-        echo "  ✅ Storage Blob Data Contributor assigned on $AZ_STORAGE_NAME"
-      fi
+      ensure_identity_role_assignment \
+        "$mi_principal_id" \
+        "Storage Blob Data Contributor" \
+        "$storage_id" \
+        "$AZ_STORAGE_NAME"
     fi
   fi
 
@@ -281,6 +318,10 @@ setup_managed_identity() {
   echo "── Role Assignment: Cognitive Services OpenAI User ─────────"
 
   if [[ -z "${AZ_AOAI_RESOURCE_NAME:-}" ]]; then
+    if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+      echo "ERROR: AZ_AOAI_RESOURCE_NAME is required when AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE." >&2
+      return 1
+    fi
     echo "  ⚠️  AZ_AOAI_RESOURCE_NAME not set – skipping AOAI role."
   else
     local aoai_id
@@ -291,24 +332,38 @@ setup_managed_identity() {
     aoai_id="${aoai_id:-}"
 
     if [[ -z "$aoai_id" ]]; then
+      if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+        echo "ERROR: Azure AI resource '$AZ_AOAI_RESOURCE_NAME' was not found while AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE." >&2
+        return 1
+      fi
       echo "  ⚠️  AOAI resource '$AZ_AOAI_RESOURCE_NAME' not found – skipping."
     else
-      if az role assignment list \
-          --assignee "$mi_principal_id" \
-          --scope "$aoai_id" \
-          --role "Cognitive Services OpenAI User" \
-          --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' | grep -q .; then
-        echo "  Role already assigned."
-      else
-        az role assignment create \
-          --assignee-object-id "$mi_principal_id" \
-          --assignee-principal-type ServicePrincipal \
-          --role "Cognitive Services OpenAI User" \
-          --scope "$aoai_id" \
-          -o none
-        echo "  ✅ Cognitive Services OpenAI User assigned on $AZ_AOAI_RESOURCE_NAME"
-      fi
+      ensure_identity_role_assignment \
+        "$mi_principal_id" \
+        "Cognitive Services OpenAI User" \
+        "$aoai_id" \
+        "$AZ_AOAI_RESOURCE_NAME"
     fi
+  fi
+
+  if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+    echo ""
+    echo "── Role Assignment: AcrPull ─────────────────────────────────"
+    local acr_id
+    acr_id=$(az acr show \
+      --name "${AZ_ACR_NAME:-}" \
+      --resource-group "${AZ_ACR_RG:-}" \
+      --query id -o tsv 2>/dev/null | tr -d '\r' || true)
+    acr_id="${acr_id:-}"
+    if [[ -z "$acr_id" ]]; then
+      echo "ERROR: ACR '${AZ_ACR_NAME:-<not set>}' was not found while AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE." >&2
+      return 1
+    fi
+    ensure_identity_role_assignment \
+      "$mi_principal_id" \
+      "AcrPull" \
+      "$acr_id" \
+      "${AZ_ACR_NAME}"
   fi
 
   echo ""
@@ -668,9 +723,10 @@ show_status() {
   echo "── Managed Identity ────────────────────────────────────────"
   echo "  Name:           ${AZ_MI_NAME:-$MI_NAME}"
   echo "  Resource Group: ${MI_RG:-<not set>}"
-  echo "  REUSE:          ${AZ_IDENTITIES_REUSE:-FALSE}"
+  echo "  Identity REUSE: ${AZ_IDENTITIES_REUSE:-FALSE}"
+  echo "  RBAC REUSE:     ${AZ_MI_ROLE_ASSIGNMENTS_REUSE:-FALSE}"
   if [[ -z "$MI_RG" ]]; then
-    echo "  Status:         NOT CHECKED (AZ_CONTAINER_APP_ENV_RG is not set)"
+    echo "  Status:         NOT CHECKED (AZ_MI_RG and AZ_CONTAINER_APP_ENV_RG are not set)"
   elif resource_exists az identity show --name "$MI_NAME" --resource-group "$MI_RG"; then
     local pid cid
     pid=$(az identity show --name "$MI_NAME" --resource-group "$MI_RG" --query principalId -o tsv | tr -d '\r')

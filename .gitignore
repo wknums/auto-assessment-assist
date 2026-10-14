@@ -105,6 +105,7 @@
 !/wrappers/http-service/Dockerfile
 !/wrappers/http-service/.dockerignore
 !/wrappers/http-service/pyrightconfig.json
+!/wrappers/http-service/nginx.conf 
 !/wrappers/http-service/app/
 !/wrappers/http-service/app/**
 !/wrappers/http-service/tests/

@@ -43,6 +43,35 @@ variable "location" {
   description = "Azure region."
 }
 
+variable "reuse_managed_identity" {
+  type        = bool
+  default     = false
+  description = "Reference an existing user-assigned managed identity instead of managing its lifecycle."
+}
+
+variable "reuse_managed_identity_role_assignments" {
+  type        = bool
+  default     = false
+  description = "Reference externally managed role assignments instead of managing them with Terraform."
+}
+
+variable "managed_identity_name" {
+  type        = string
+  default     = "id-awreason-http-service"
+  description = "Name of the user-assigned managed identity."
+
+  validation {
+    condition     = length(trimspace(var.managed_identity_name)) > 0
+    error_message = "managed_identity_name must not be empty."
+  }
+}
+
+variable "managed_identity_resource_group_name" {
+  type        = string
+  default     = ""
+  description = "Resource group containing the managed identity. Empty uses resource_group_name."
+}
+
 variable "container_app_env_id" {
   type        = string
   description = "Resource ID of the Container Apps Environment."
@@ -257,33 +286,75 @@ variable "vnet_subnet_id" {
 # ── Managed Identity ──────────────────────────────────────────────────
 
 resource "azurerm_user_assigned_identity" "awreason" {
-  name                = "id-awreason-http-service"
-  resource_group_name = var.resource_group_name
+  count = var.reuse_managed_identity ? 0 : 1
+
+  name                = var.managed_identity_name
+  resource_group_name = local.managed_identity_resource_group_name
   location            = var.location
+}
+
+data "azurerm_user_assigned_identity" "awreason" {
+  count = var.reuse_managed_identity ? 1 : 0
+
+  name                = var.managed_identity_name
+  resource_group_name = local.managed_identity_resource_group_name
+}
+
+locals {
+  managed_identity_resource_group_name = var.managed_identity_resource_group_name != "" ? var.managed_identity_resource_group_name : var.resource_group_name
+  managed_identity_id                  = var.reuse_managed_identity ? one(data.azurerm_user_assigned_identity.awreason[*].id) : one(azurerm_user_assigned_identity.awreason[*].id)
+  managed_identity_client_id           = var.reuse_managed_identity ? one(data.azurerm_user_assigned_identity.awreason[*].client_id) : one(azurerm_user_assigned_identity.awreason[*].client_id)
+  managed_identity_principal_id        = var.reuse_managed_identity ? one(data.azurerm_user_assigned_identity.awreason[*].principal_id) : one(azurerm_user_assigned_identity.awreason[*].principal_id)
+}
+
+moved {
+  from = azurerm_user_assigned_identity.awreason
+  to   = azurerm_user_assigned_identity.awreason[0]
 }
 
 # ── Role: Storage Blob Data Contributor on the storage account ───────
 
 resource "azurerm_role_assignment" "blob_contributor" {
+  count = var.reuse_managed_identity_role_assignments ? 0 : 1
+
   scope                = var.blob_account_id
   role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azurerm_user_assigned_identity.awreason.principal_id
+  principal_id         = local.managed_identity_principal_id
 }
 
 # ── Role: Cognitive Services OpenAI User on the AOAI resource ────────
 
 resource "azurerm_role_assignment" "aoai_user" {
+  count = var.reuse_managed_identity_role_assignments ? 0 : 1
+
   scope                = var.aoai_account_id
   role_definition_name = "Cognitive Services OpenAI User"
-  principal_id         = azurerm_user_assigned_identity.awreason.principal_id
+  principal_id         = local.managed_identity_principal_id
 }
 
 # ── Role: AcrPull on the ACR ─────────────────────────────────────────
 
 resource "azurerm_role_assignment" "acr_pull" {
+  count = var.reuse_managed_identity_role_assignments ? 0 : 1
+
   scope                = var.acr_id
   role_definition_name = "AcrPull"
-  principal_id         = azurerm_user_assigned_identity.awreason.principal_id
+  principal_id         = local.managed_identity_principal_id
+}
+
+moved {
+  from = azurerm_role_assignment.blob_contributor
+  to   = azurerm_role_assignment.blob_contributor[0]
+}
+
+moved {
+  from = azurerm_role_assignment.aoai_user
+  to   = azurerm_role_assignment.aoai_user[0]
+}
+
+moved {
+  from = azurerm_role_assignment.acr_pull
+  to   = azurerm_role_assignment.acr_pull[0]
 }
 
 # ── Storage Network Rules (VNet mode only) ────────────────────────────
@@ -315,7 +386,7 @@ resource "azurerm_container_app" "awreason" {
 
   identity {
     type         = "UserAssigned"
-    identity_ids = [azurerm_user_assigned_identity.awreason.id]
+    identity_ids = [local.managed_identity_id]
   }
 
   secret {
@@ -341,7 +412,7 @@ resource "azurerm_container_app" "awreason" {
 
   registry {
     server   = var.acr_login_server
-    identity = azurerm_user_assigned_identity.awreason.id
+    identity = local.managed_identity_id
   }
 
   template {
@@ -446,7 +517,7 @@ resource "azurerm_container_app" "awreason" {
 
       env {
         name  = "AZURE_CLIENT_ID"
-        value = azurerm_user_assigned_identity.awreason.client_id
+        value = local.managed_identity_client_id
       }
 
       env {
@@ -577,5 +648,5 @@ output "api_base_url" {
 }
 
 output "managed_identity_client_id" {
-  value = azurerm_user_assigned_identity.awreason.client_id
+  value = local.managed_identity_client_id
 }

@@ -164,7 +164,11 @@ This script:
   `TALENT_MATCH_CLIENT_ID` when that variable is set.
 - At the end, displays all pending changes to the selected env file (old → new) and prompts for confirmation before writing.
 - Pass `-y` / `--yes` to skip the interactive prompt and auto-approve.
-- Respects `AZ_IDENTITIES_REUSE` – when `TRUE`, the MI must already exist.
+- Respects `AZ_IDENTITIES_REUSE` – when `TRUE`, the MI must already exist and
+  remains outside Terraform lifecycle management.
+- Respects `AZ_MI_ROLE_ASSIGNMENTS_REUSE` – when `TRUE`, the required Storage,
+  Azure OpenAI, and ACR role assignments must already exist and are verified
+  without being imported or managed.
 
 > **Caveat:** If you decline the `.env` write and re-run, `AAD_CLIENT_SECRET` will
 > still be empty in `.env`, so the script will append another client credential.
@@ -214,8 +218,37 @@ DEPLOY_ENV_FILE=.env_qa bash deploy.sh yaml
 ```
 
 Terraform deployments isolate state by env filename: `.env` uses the existing
-`default` workspace, while `.env_qa_mcaps` uses `qa_mcaps`. Set
-`DEPLOY_TF_WORKSPACE` to choose another stable workspace explicitly.
+`default` workspace, `.env_qa_mcaps` uses `qa_mcaps`, and `.env.azure` uses
+`azure`. Set `DEPLOY_TF_WORKSPACE` to choose another stable workspace
+explicitly.
+
+Terraform authentication through Azure CLI requires both Azure Resource Manager
+and Microsoft Graph tokens. Before initializing Terraform, the deploy script
+checks that the selected tenant can issue the Graph token. If Conditional Access
+or MFA prevents token acquisition, complete an interactive login for that scope:
+
+```bash
+az account clear
+az login --tenant <tenant-id> --scope "https://graph.microsoft.com/.default"
+az account set --subscription <subscription-id>
+```
+
+On Windows, Azure CLI uses Web Account Manager by default. If it cannot complete
+an external authentication challenge, retry with browser-based authentication:
+
+```bash
+az account clear
+az config set core.enable_broker_on_windows=false
+az login --tenant <tenant-id> --scope "https://graph.microsoft.com/.default"
+az account set --subscription <subscription-id>
+```
+
+This changes the user's global Azure CLI authentication setting. Restore the
+Windows broker afterward, if required:
+
+```bash
+az config set core.enable_broker_on_windows=true
+```
 
 The deploy script:
 - **Auto-creates** ACR, Container Apps Environment, and Storage Account when `AZ_*_REUSE=FALSE` and the resource doesn't exist.  Generated names are written back to `.env`.
@@ -232,7 +265,44 @@ The deploy script:
 | `AZ_STORAGE_REUSE` | Must exist | Creates if missing |
 | `AZ_ACR_REUSE` | Must exist | Creates Basic SKU ACR |
 | `AZ_CONTAINER_APP_ENV_REUSE` | Must exist | Creates ACA Environment |
-| `AZ_IDENTITIES_REUSE` | Must exist | Creates MI + role assignments |
+| `AZ_IDENTITIES_REUSE` | References an existing MI through an AzureRM data source; never imports or manages it | Creates/imports and manages the MI |
+| `AZ_MI_ROLE_ASSIGNMENTS_REUSE` | Verifies existing AcrPull, Storage Blob Data Contributor, and Cognitive Services OpenAI User assignments; never imports or manages them | Creates/imports and manages the assignments |
+
+For a customer-owned identity and customer-owned RBAC, configure:
+
+```dotenv
+AZ_IDENTITIES_REUSE=TRUE
+AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE
+AZ_MI_NAME=<existing-managed-identity-name>
+AZ_MI_RG=<managed-identity-resource-group>
+AZ_MI_RESOURCE_ID=<managed-identity-resource-id>
+AZ_MI_CLIENT_ID=<managed-identity-client-id>
+AZ_MI_PRINCIPAL_ID=<managed-identity-principal-id>
+```
+
+`AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE` requires `AZ_IDENTITIES_REUSE=TRUE`.
+`setup-identity.sh mi` and `deploy.sh preview/apply/yaml` verify the identity and
+all three required assignments before deployment.
+
+#### Migrating previously imported external identity state
+
+Older versions imported reused identities and role assignments into Terraform
+state. The updated script deliberately stops rather than planning their
+destruction. In the selected Terraform workspace, inspect each address reported
+by the script and detach it with `terraform state rm`; this changes state only
+and does not delete the Azure object.
+
+```bash
+cd wrappers/http-service/deploy/terraform
+terraform workspace select <workspace>
+terraform state show azurerm_user_assigned_identity.awreason
+terraform state rm azurerm_user_assigned_identity.awreason
+```
+
+If externally owned role assignments were also imported, remove only the
+addresses named by the script. Re-run `bash deploy.sh apply` and confirm the plan
+contains no managed-identity or role-assignment delete/replace action before
+approving it.
 
 ### Manual alternatives
 

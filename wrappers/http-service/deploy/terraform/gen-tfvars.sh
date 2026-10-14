@@ -36,6 +36,19 @@ if [[ "${AUTH_MODE:-none}" == "entra" && -z "$AAD_API_CLIENT_ID" ]]; then
   exit 1
 fi
 
+to_hcl_bool() {
+  if [[ "${1^^}" == "TRUE" ]]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+REUSE_MANAGED_IDENTITY=$(to_hcl_bool "${AZ_IDENTITIES_REUSE:-FALSE}")
+REUSE_MANAGED_IDENTITY_ROLE_ASSIGNMENTS=$(to_hcl_bool "${AZ_MI_ROLE_ASSIGNMENTS_REUSE:-FALSE}")
+MANAGED_IDENTITY_NAME="${AZ_MI_NAME:-id-awreason-http-service}"
+MANAGED_IDENTITY_RG="${AZ_MI_RG:-${AZ_CONTAINER_APP_ENV_RG:-}}"
+
 # ── Set active subscription ──────────────────────────────────────────
 if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
   az account set --subscription "${AZURE_SUBSCRIPTION_ID}" -o none
@@ -161,6 +174,12 @@ cat > "$TFVARS" <<EOF
 
 resource_group_name   = "${AZ_CONTAINER_APP_ENV_RG}"
 location              = "${AZ_LOCATION}"
+
+# Managed identity ownership
+reuse_managed_identity                  = ${REUSE_MANAGED_IDENTITY}
+reuse_managed_identity_role_assignments = ${REUSE_MANAGED_IDENTITY_ROLE_ASSIGNMENTS}
+managed_identity_name                   = "${MANAGED_IDENTITY_NAME}"
+managed_identity_resource_group_name    = "${MANAGED_IDENTITY_RG}"
 
 # Container Apps
 container_app_env_id  = "${CONTAINER_APP_ENV_ID}"

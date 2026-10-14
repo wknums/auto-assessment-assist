@@ -94,6 +94,143 @@ resource_exists() {
   "$@" &>/dev/null
 }
 
+ensure_terraform_azure_auth() {
+  local graph_scope="https://graph.microsoft.com/.default"
+  local auth_error
+
+  if [[ -z "${AZURE_TENANT_ID:-}" ]]; then
+    echo "ERROR: AZURE_TENANT_ID is not set in ${ENV_FILE}." >&2
+    return 1
+  fi
+
+  if auth_error=$(az account get-access-token \
+      --tenant "${AZURE_TENANT_ID}" \
+      --scope "$graph_scope" \
+      --output none 2>&1); then
+    return
+  fi
+
+  echo "ERROR: Azure CLI could not acquire the Microsoft Graph token required by Terraform." >&2
+  printf '%s\n' "$auth_error" >&2
+  cat >&2 <<EOF
+
+Complete any required Conditional Access or MFA challenge, then retry:
+  az account clear
+  az login --tenant "${AZURE_TENANT_ID}" --scope "${graph_scope}"
+  az account set --subscription "${AZURE_SUBSCRIPTION_ID}"
+
+On Windows, if Web Account Manager does not complete the challenge, retry with
+browser-based authentication:
+  az account clear
+  az config set core.enable_broker_on_windows=false
+  az login --tenant "${AZURE_TENANT_ID}" --scope "${graph_scope}"
+  az account set --subscription "${AZURE_SUBSCRIPTION_ID}"
+EOF
+  return 1
+}
+
+validate_identity_reuse_configuration() {
+  if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE && ! is_reuse AZ_IDENTITIES_REUSE; then
+    echo "ERROR: AZ_MI_ROLE_ASSIGNMENTS_REUSE=TRUE requires AZ_IDENTITIES_REUSE=TRUE." >&2
+    echo "       Externally managed roles require an existing externally managed identity." >&2
+    return 1
+  fi
+}
+
+resolve_existing_managed_identity() {
+  local mi_name="${AZ_MI_NAME:-id-awreason-http-service}"
+  local mi_rg="${AZ_MI_RG:-${AZ_CONTAINER_APP_ENV_RG:-}}"
+  local identity_json actual_id actual_client_id actual_principal_id
+
+  if [[ -z "$mi_rg" ]]; then
+    echo "ERROR: Set AZ_MI_RG or AZ_CONTAINER_APP_ENV_RG to locate the managed identity." >&2
+    return 1
+  fi
+
+  if ! identity_json=$(az identity show \
+      --name "$mi_name" \
+      --resource-group "$mi_rg" \
+      --query "{id:id,clientId:clientId,principalId:principalId}" \
+      --output json 2>&1); then
+    echo "ERROR: Managed identity '$mi_name' was not found in resource group '$mi_rg'." >&2
+    printf '%s\n' "$identity_json" >&2
+    return 1
+  fi
+
+  actual_id=$(az identity show \
+    --name "$mi_name" --resource-group "$mi_rg" --query id -o tsv | tr -d '\r')
+  actual_client_id=$(az identity show \
+    --name "$mi_name" --resource-group "$mi_rg" --query clientId -o tsv | tr -d '\r')
+  actual_principal_id=$(az identity show \
+    --name "$mi_name" --resource-group "$mi_rg" --query principalId -o tsv | tr -d '\r')
+
+  if [[ -n "${AZ_MI_RESOURCE_ID:-}" && "${AZ_MI_RESOURCE_ID,,}" != "${actual_id,,}" ]]; then
+    echo "ERROR: AZ_MI_RESOURCE_ID does not match '$mi_name' in '$mi_rg'." >&2
+    return 1
+  fi
+  if [[ -n "${AZ_MI_CLIENT_ID:-}" && "${AZ_MI_CLIENT_ID,,}" != "${actual_client_id,,}" ]]; then
+    echo "ERROR: AZ_MI_CLIENT_ID does not match '$mi_name' in '$mi_rg'." >&2
+    return 1
+  fi
+  if [[ -n "${AZ_MI_PRINCIPAL_ID:-}" && "${AZ_MI_PRINCIPAL_ID,,}" != "${actual_principal_id,,}" ]]; then
+    echo "ERROR: AZ_MI_PRINCIPAL_ID does not match '$mi_name' in '$mi_rg'." >&2
+    return 1
+  fi
+
+  export AZ_MI_NAME="$mi_name"
+  export AZ_MI_RG="$mi_rg"
+  export AZ_MI_RESOURCE_ID="$actual_id"
+  export AZ_MI_CLIENT_ID="$actual_client_id"
+  export AZ_MI_PRINCIPAL_ID="$actual_principal_id"
+
+  echo "  ✅ Managed identity resolved: $mi_name ($actual_client_id)"
+}
+
+verify_identity_role_assignment() {
+  local role="$1" scope="$2" target="$3"
+  local assignment_id assignment_error
+
+  if ! assignment_id=$(az role assignment list \
+      --assignee "${AZ_MI_PRINCIPAL_ID}" \
+      --role "$role" \
+      --scope "$scope" \
+      --query "[0].id" -o tsv 2>&1 | tr -d '\r'); then
+    assignment_error="$assignment_id"
+    echo "ERROR: Could not verify $role on $target." >&2
+    printf '%s\n' "$assignment_error" >&2
+    return 1
+  fi
+  if [[ -z "$assignment_id" ]]; then
+    echo "ERROR: Required externally managed role '$role' is missing on $target." >&2
+    return 1
+  fi
+  echo "  ✅ $role verified on $target"
+}
+
+verify_reused_identity_role_assignments() {
+  local storage_id aoai_id acr_id
+
+  if ! is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+    return
+  fi
+
+  echo ""
+  echo "── Verifying externally managed identity roles ─────────────"
+  storage_id=$(az storage account show \
+    --name "${AZ_STORAGE_NAME}" --resource-group "${AZ_STORAGE_RG}" \
+    --query id -o tsv | tr -d '\r')
+  aoai_id=$(az cognitiveservices account show \
+    --name "${AZ_AOAI_RESOURCE_NAME}" --resource-group "${AZ_AOAI_RESOURCE_RG}" \
+    --query id -o tsv | tr -d '\r')
+  acr_id=$(az acr show \
+    --name "${AZ_ACR_NAME}" --resource-group "${AZ_ACR_RG}" \
+    --query id -o tsv | tr -d '\r')
+
+  verify_identity_role_assignment "Storage Blob Data Contributor" "$storage_id" "$AZ_STORAGE_NAME"
+  verify_identity_role_assignment "Cognitive Services OpenAI User" "$aoai_id" "$AZ_AOAI_RESOURCE_NAME"
+  verify_identity_role_assignment "AcrPull" "$acr_id" "$AZ_ACR_NAME"
+}
+
 resolve_acr_login_server() {
   local login_server
   login_server=$(az acr show \
@@ -813,10 +950,11 @@ do_build() {
 # managed resource and imports it if it exists in Azure but not in state.
 
 _tf_try_import() {
-  # Usage: _tf_try_import <tf_address> <azure_resource_id>
-  local addr="$1" rid="$2"
+  # Usage: _tf_try_import <tf_address> <azure_resource_id> [legacy_tf_address]
+  local addr="$1" rid="$2" legacy_addr="${3:-}"
   # Skip if already in state
-  if terraform state show "$addr" &>/dev/null; then
+  if terraform state show "$addr" &>/dev/null || \
+      { [[ -n "$legacy_addr" ]] && terraform state show "$legacy_addr" &>/dev/null; }; then
     echo "  ✓ $addr (already in state)"
     return
   fi
@@ -831,45 +969,103 @@ _tf_try_import() {
   fi
 }
 
+_tf_require_external_state_detached() {
+  local ownership="$1"
+  shift
+  local addr
+  for addr in "$@"; do
+    if terraform state show "$addr" &>/dev/null; then
+      echo "ERROR: $ownership is configured for external reuse but is still tracked in Terraform state as:" >&2
+      echo "       $addr" >&2
+      echo "       Confirm the selected workspace, then detach it without deleting the Azure object:" >&2
+      echo "       terraform state rm '$addr'" >&2
+      return 1
+    fi
+  done
+}
+
 _tf_import_if_needed() {
-  local mi_rg="${AZ_CONTAINER_APP_ENV_RG}"
+  local mi_rg="${AZ_MI_RG:-${AZ_CONTAINER_APP_ENV_RG}}"
   local mi_name="${AZ_MI_NAME:-id-awreason-http-service}"
   local sub_id="${AZURE_SUBSCRIPTION_ID}"
+  local app_rg="${AZ_CONTAINER_APP_ENV_RG}"
 
   # ── Managed Identity ────────────────────────────────────────────
-  local mi_id="/subscriptions/${sub_id}/resourceGroups/${mi_rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${mi_name}"
-  _tf_try_import "azurerm_user_assigned_identity.awreason" "$mi_id"
+  if is_reuse AZ_IDENTITIES_REUSE; then
+    _tf_require_external_state_detached \
+      "Managed identity '$mi_name'" \
+      "azurerm_user_assigned_identity.awreason" \
+      'azurerm_user_assigned_identity.awreason[0]'
+    echo "  ✓ Managed identity '$mi_name' is externally managed (not imported)"
+  else
+    local mi_id
+    mi_id=$(az identity show \
+      --name "$mi_name" --resource-group "$mi_rg" \
+      --query id -o tsv 2>/dev/null | tr -d '\r' || true)
+    _tf_try_import \
+      'azurerm_user_assigned_identity.awreason[0]' \
+      "${mi_id:-}" \
+      "azurerm_user_assigned_identity.awreason"
+  fi
 
-  # ── Role Assignment: Storage Blob Data Contributor ──────────────
-  local blob_ra_id
-  blob_ra_id=$(az role assignment list \
-    --assignee "${AZ_MI_PRINCIPAL_ID:-}" \
-    --role "Storage Blob Data Contributor" \
-    --scope "/subscriptions/${sub_id}/resourceGroups/${AZ_STORAGE_RG}/providers/Microsoft.Storage/storageAccounts/${AZ_STORAGE_NAME}" \
-    --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' || true)
-  _tf_try_import "azurerm_role_assignment.blob_contributor" "${blob_ra_id:-}"
+  if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+    _tf_require_external_state_detached \
+      "Storage Blob Data Contributor role assignment" \
+      "azurerm_role_assignment.blob_contributor" \
+      'azurerm_role_assignment.blob_contributor[0]'
+    _tf_require_external_state_detached \
+      "Cognitive Services OpenAI User role assignment" \
+      "azurerm_role_assignment.aoai_user" \
+      'azurerm_role_assignment.aoai_user[0]'
+    _tf_require_external_state_detached \
+      "AcrPull role assignment" \
+      "azurerm_role_assignment.acr_pull" \
+      'azurerm_role_assignment.acr_pull[0]'
+    echo "  ✓ Managed identity role assignments are externally managed (not imported)"
+  else
+    # ── Role Assignment: Storage Blob Data Contributor ────────────
+    local blob_ra_id
+    blob_ra_id=$(az role assignment list \
+      --assignee "${AZ_MI_PRINCIPAL_ID:-}" \
+      --role "Storage Blob Data Contributor" \
+      --scope "/subscriptions/${sub_id}/resourceGroups/${AZ_STORAGE_RG}/providers/Microsoft.Storage/storageAccounts/${AZ_STORAGE_NAME}" \
+      --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' || true)
+    _tf_try_import \
+      'azurerm_role_assignment.blob_contributor[0]' \
+      "${blob_ra_id:-}" \
+      "azurerm_role_assignment.blob_contributor"
 
-  # ── Role Assignment: Cognitive Services OpenAI User ─────────────
-  local aoai_ra_id
-  aoai_ra_id=$(az role assignment list \
-    --assignee "${AZ_MI_PRINCIPAL_ID:-}" \
-    --role "Cognitive Services OpenAI User" \
-    --scope "/subscriptions/${sub_id}/resourceGroups/${AZ_AOAI_RESOURCE_RG}/providers/Microsoft.CognitiveServices/accounts/${AZ_AOAI_RESOURCE_NAME}" \
-    --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' || true)
-  _tf_try_import "azurerm_role_assignment.aoai_user" "${aoai_ra_id:-}"
+    # ── Role Assignment: Cognitive Services OpenAI User ───────────
+    local aoai_ra_id
+    aoai_ra_id=$(az role assignment list \
+      --assignee "${AZ_MI_PRINCIPAL_ID:-}" \
+      --role "Cognitive Services OpenAI User" \
+      --scope "/subscriptions/${sub_id}/resourceGroups/${AZ_AOAI_RESOURCE_RG}/providers/Microsoft.CognitiveServices/accounts/${AZ_AOAI_RESOURCE_NAME}" \
+      --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' || true)
+    _tf_try_import \
+      'azurerm_role_assignment.aoai_user[0]' \
+      "${aoai_ra_id:-}" \
+      "azurerm_role_assignment.aoai_user"
 
-  # ── Role Assignment: AcrPull on the ACR ─────────────────────────
-  local acr_ra_id
-  acr_ra_id=$(az role assignment list \
-    --assignee "${AZ_MI_PRINCIPAL_ID:-}" \
-    --role "AcrPull" \
-    --scope "/subscriptions/${sub_id}/resourceGroups/${AZ_ACR_RG}/providers/Microsoft.ContainerRegistry/registries/${AZ_ACR_NAME}" \
-    --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' || true)
-  _tf_try_import "azurerm_role_assignment.acr_pull" "${acr_ra_id:-}"
+    # ── Role Assignment: AcrPull on the ACR ───────────────────────
+    local acr_ra_id
+    acr_ra_id=$(az role assignment list \
+      --assignee "${AZ_MI_PRINCIPAL_ID:-}" \
+      --role "AcrPull" \
+      --scope "/subscriptions/${sub_id}/resourceGroups/${AZ_ACR_RG}/providers/Microsoft.ContainerRegistry/registries/${AZ_ACR_NAME}" \
+      --query "[0].id" -o tsv 2>/dev/null | tr -d '\r' || true)
+    _tf_try_import \
+      'azurerm_role_assignment.acr_pull[0]' \
+      "${acr_ra_id:-}" \
+      "azurerm_role_assignment.acr_pull"
+  fi
 
   # ── Container App ───────────────────────────────────────────────
-  local ca_id="/subscriptions/${sub_id}/resourceGroups/${mi_rg}/providers/Microsoft.App/containerApps/${AZ_CONTAINER_APP_NAME}"
-  _tf_try_import "azurerm_container_app.awreason" "$ca_id"
+  local ca_id
+  ca_id=$(az containerapp show \
+    --name "${AZ_CONTAINER_APP_NAME}" --resource-group "$app_rg" \
+    --query id -o tsv 2>/dev/null | tr -d '\r' || true)
+  _tf_try_import "azurerm_container_app.awreason" "${ca_id:-}"
 
   # ── Storage Network Rules (VNet mode only) ─────────────────────
   if is_vnet_enabled; then
@@ -879,13 +1075,23 @@ _tf_import_if_needed() {
 }
 
 select_terraform_workspace() {
-  local env_basename workspace
+  local env_basename workspace workspace_default
   env_basename=$(basename "$ENV_FILE")
   if [[ "$env_basename" == ".env" ]]; then
     workspace="default"
   else
-    workspace="${DEPLOY_TF_WORKSPACE:-${env_basename#.env_}}"
+    case "$env_basename" in
+      .env.*) workspace_default="${env_basename#.env.}" ;;
+      .env_*) workspace_default="${env_basename#.env_}" ;;
+      *)      workspace_default="$env_basename" ;;
+    esac
+    workspace="${DEPLOY_TF_WORKSPACE:-$workspace_default}"
     workspace=$(printf '%s' "$workspace" | tr -c '[:alnum:]_-' '-')
+  fi
+
+  if [[ -z "$workspace" || "$workspace" == -* ]]; then
+    echo "ERROR: Invalid Terraform workspace '$workspace'. Set DEPLOY_TF_WORKSPACE to a name that starts with a letter, number, or underscore." >&2
+    return 1
   fi
 
   if terraform workspace select "$workspace" >/dev/null 2>&1; then
@@ -967,6 +1173,12 @@ do_apply_force() {
 
 _do_apply_impl() {
   local mode="${1:-interactive}"
+  ensure_terraform_azure_auth
+  validate_identity_reuse_configuration
+  if is_reuse AZ_IDENTITIES_REUSE; then
+    resolve_existing_managed_identity
+  fi
+  verify_reused_identity_role_assignments
   refresh_derived
   echo ""
   echo "── Generating terraform.tfvars ─────────────────────────────"
@@ -1049,6 +1261,9 @@ _do_apply_impl() {
 }
 
 do_yaml() {
+  validate_identity_reuse_configuration
+  resolve_existing_managed_identity
+  verify_reused_identity_role_assignments
   refresh_derived
   echo ""
   echo "── Deploying via ACA YAML manifest ─────────────────────────"
@@ -1056,16 +1271,8 @@ do_yaml() {
   resolved_yaml="${SCRIPT_DIR}/_resolved-aca.yaml"
 
   # Resolve values for the YAML placeholders
-  MI_RESOURCE_ID=$(az identity show \
-    --name "id-awreason-http-service" \
-    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
-    --query id -o tsv 2>/dev/null | tr -d '\r' || true)
-  MI_RESOURCE_ID="${MI_RESOURCE_ID:-}"
-  MI_CLIENT_ID=$(az identity show \
-    --name "id-awreason-http-service" \
-    --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
-    --query clientId -o tsv 2>/dev/null | tr -d '\r' || true)
-  MI_CLIENT_ID="${MI_CLIENT_ID:-}"
+  MI_RESOURCE_ID="${AZ_MI_RESOURCE_ID}"
+  MI_CLIENT_ID="${AZ_MI_CLIENT_ID}"
   CONTAINER_APP_ENV_ID=$(az containerapp env show \
     --name "${AZ_CONTAINER_APP_ENV_NAME}" \
     --resource-group "${AZ_CONTAINER_APP_ENV_RG}" \
@@ -1219,6 +1426,17 @@ do_model() {
 # ── Preview ───────────────────────────────────────────────────────────
 
 do_preview() {
+  local identity_ownership="TERRAFORM-MANAGED"
+  local role_ownership="TERRAFORM-MANAGED"
+  validate_identity_reuse_configuration
+  if is_reuse AZ_IDENTITIES_REUSE; then
+    identity_ownership="EXTERNAL"
+    resolve_existing_managed_identity
+  fi
+  if is_reuse AZ_MI_ROLE_ASSIGNMENTS_REUSE; then
+    role_ownership="EXTERNAL"
+  fi
+  verify_reused_identity_role_assignments
   refresh_derived
 
   echo ""
@@ -1312,6 +1530,9 @@ do_preview() {
   echo ""
   echo "── Managed Identity ────────────────────────────────────────"
   echo "  Name:         ${AZ_MI_NAME:-id-awreason-http-service}"
+  echo "  Resource RG:  ${AZ_MI_RG:-${AZ_CONTAINER_APP_ENV_RG:-<not set>}}"
+  echo "  Identity:     $identity_ownership"
+  echo "  RBAC:         $role_ownership"
   echo "  Principal ID: ${AZ_MI_PRINCIPAL_ID:-<not set — run setup-identity.sh>}"
   echo "  Client ID:    ${AZ_MI_CLIENT_ID:-<not set — run setup-identity.sh>}"
   echo "  Roles:"
@@ -1400,7 +1621,7 @@ do_preview() {
   if [[ -z "${AZ_MI_PRINCIPAL_ID:-}" ]] || \
       ! resource_exists az identity show \
         --name "${AZ_MI_NAME:-id-awreason-http-service}" \
-        --resource-group "${AZ_CONTAINER_APP_ENV_RG:-}"; then
+        --resource-group "${AZ_MI_RG:-${AZ_CONTAINER_APP_ENV_RG:-}}"; then
     echo "  ❌ AZ_MI_PRINCIPAL_ID is empty — run: bash setup-identity.sh mi"
     ready=false
   else
