@@ -62,6 +62,9 @@ if [[ -z "$AAD_API_SCOPE" && -n "$AAD_API_CLIENT_ID" ]]; then
   AAD_API_SCOPE="api://${AAD_API_CLIENT_ID}/access_as_user"
 fi
 
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/entra-config.sh"
+
 # ── Set active subscription so all az commands target the right one ───
 if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
   az account set --subscription "${AZURE_SUBSCRIPTION_ID}" -o none
@@ -1276,6 +1279,7 @@ do_yaml() {
       return 1
       ;;
   esac
+  validate_entra_configuration
 
   validate_identity_reuse_configuration
   resolve_existing_managed_identity
@@ -1642,11 +1646,11 @@ do_preview() {
   fi
 
   if [[ "${AUTH_MODE:-none}" == "entra" ]]; then
-    if [[ -z "${AAD_API_CLIENT_ID:-}" || -z "${AAD_API_SCOPE:-}" ]]; then
-      echo "  ❌ Entra API registration is incomplete — run: bash setup-identity.sh app"
-      ready=false
-    else
+    if validate_entra_configuration; then
       echo "  ✅ Entra API registration is configured"
+    else
+      echo "  ❌ Entra API registration is invalid — run: bash setup-identity.sh app --yes"
+      ready=false
     fi
   fi
 

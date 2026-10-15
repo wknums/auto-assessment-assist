@@ -196,6 +196,20 @@ pending, a tenant administrator must grant admin consent to
 individual user consent. Run `bash setup-identity.sh status` to verify consent,
 scope, role, redirect, and Talent Match assignment state.
 
+If sign-in returns directly to the login page, inspect `AAD_API_CLIENT_ID` and
+`AAD_API_SCOPE` in the selected deployment env file. An all-zero placeholder
+scope causes Entra to return an OAuth error without an interactive challenge
+when the browser already has a Microsoft session. Repair and redeploy the
+configuration with:
+
+```bash
+bash setup-identity.sh app --yes
+bash deploy.sh apply
+```
+
+Deployment now rejects empty, malformed, or all-zero Entra application IDs and
+requires `AAD_API_SCOPE=api://<AAD_API_CLIENT_ID>/access_as_user`.
+
 The API registration must be dedicated to this deployment. The setup script
 refuses to replace an existing registration that contains unrelated scopes or
 app roles. Existing Streamlit redirects are preserved, and

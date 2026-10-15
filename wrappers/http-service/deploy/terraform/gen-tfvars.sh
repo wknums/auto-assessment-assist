@@ -13,6 +13,7 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
 ENV_FILE="${1:-$(git rev-parse --show-toplevel 2>/dev/null || echo '../../../..')/.env}"
+SCRIPT_DIR_GEN="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "ERROR: .env file not found at $ENV_FILE" >&2
@@ -31,10 +32,10 @@ AAD_API_SCOPE="${AAD_API_SCOPE:-}"
 if [[ -z "$AAD_API_SCOPE" && -n "$AAD_API_CLIENT_ID" ]]; then
   AAD_API_SCOPE="api://${AAD_API_CLIENT_ID}/access_as_user"
 fi
-if [[ "${AUTH_MODE:-none}" == "entra" && -z "$AAD_API_CLIENT_ID" ]]; then
-  echo "ERROR: AUTH_MODE=entra requires AAD_API_CLIENT_ID. Run setup-identity.sh app first." >&2
-  exit 1
-fi
+
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR_GEN}/entra-config.sh"
+validate_entra_configuration
 
 to_hcl_bool() {
   if [[ "${1^^}" == "TRUE" ]]; then
@@ -126,7 +127,6 @@ if [[ "${AUTH_MODE:-none}" == "entra" && -z "$STREAMLIT_REDIRECT_URI_RESOLVED" ]
 fi
 
 # ── Resolve image tag (read from build, fallback to git SHA / timestamp) ──
-SCRIPT_DIR_GEN="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || cd "$(dirname "$0")/../../../.." && pwd)"
 if [[ -z "${AZ_IMAGE_TAG:-}" ]] || [[ "${AZ_IMAGE_TAG}" == "latest" ]]; then
   if [[ -f "${SCRIPT_DIR_GEN}/.last_image_tag" ]] && [[ -s "${SCRIPT_DIR_GEN}/.last_image_tag" ]]; then

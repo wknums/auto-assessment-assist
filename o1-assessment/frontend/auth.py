@@ -31,6 +31,8 @@ from typing import Optional
 
 import streamlit as st
 
+_PLACEHOLDER_GUID = "00000000-0000-0000-0000-000000000000"
+
 # ── Detect Azure environment ──────────────────────────────────────────
 # Azure Container Apps injects CONTAINER_APP_REVISION and App Service injects
 # WEBSITE_SITE_NAME. CONTAINER_APP_NAME and AUTH_MODE are deployment settings
@@ -89,7 +91,12 @@ def require_auth() -> Optional[dict]:
         return None
 
     authority = f"https://login.microsoftonline.com/{tenant_id}"
-    scopes = [_get_api_scope()]
+    try:
+        scopes = [_get_api_scope()]
+    except ValueError as exc:
+        st.error(f"Entra ID auth configuration is invalid: {exc}")
+        st.stop()
+        return None
 
     # ── Build MSAL Confidential Client ───────────────────────────────
     cache = _get_token_cache()
@@ -107,6 +114,19 @@ def require_auth() -> Optional[dict]:
     # ── Check for auth callback (code in query params) ───────────────
     query_params = st.query_params
     auth_code = query_params.get("code")
+    auth_error = query_params.get("error")
+
+    if auth_error:
+        state = query_params.get("state", "")
+        if not _validate_auth_state(state):
+            st.error("Authentication response state was invalid or expired. Start sign-in again.")
+            st.stop()
+            return None
+
+        error_description = query_params.get("error_description", auth_error)
+        st.error(f"Authentication failed: {error_description}")
+        st.stop()
+        return None
 
     if auth_code:
         state = query_params.get("state", "")
@@ -293,15 +313,23 @@ def _get_redirect_uri() -> str:
 def _get_api_scope() -> str:
     """Return the delegated scope exposed by the HTTP backend registration."""
     configured_scope = os.environ.get("AAD_API_SCOPE", "")
-    if configured_scope:
-        return configured_scope
-
     api_client_id = os.environ.get("AAD_API_CLIENT_ID", "")
     if not api_client_id:
-        raise RuntimeError(
+        raise ValueError(
             "AAD_API_SCOPE or AAD_API_CLIENT_ID is required for Entra API auth."
         )
-    return f"api://{api_client_id}/access_as_user"
+    if api_client_id == _PLACEHOLDER_GUID:
+        raise ValueError(
+            "AAD_API_CLIENT_ID still contains the all-zero placeholder. "
+            "Run setup-identity.sh app and redeploy."
+        )
+
+    expected_scope = f"api://{api_client_id}/access_as_user"
+    if configured_scope and configured_scope != expected_scope:
+        raise ValueError(
+            f"AAD_API_SCOPE must be {expected_scope!r}; got {configured_scope!r}."
+        )
+    return configured_scope or expected_scope
 
 
 def _store_token_result(result: dict) -> dict:
