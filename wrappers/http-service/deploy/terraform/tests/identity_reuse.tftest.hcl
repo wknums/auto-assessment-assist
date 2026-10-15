@@ -25,6 +25,7 @@ run "deployment_manages_identity_and_roles" {
     aoai_account_id         = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/ai-rg/providers/Microsoft.CognitiveServices/accounts/example"
     azure_openai_endpoint   = "https://example.openai.azure.com/"
     reasoning_deployment_01 = "reasoning-model"
+    auth_mode               = "entra"
   }
 
   assert {
@@ -40,6 +41,11 @@ run "deployment_manages_identity_and_roles" {
       length(azurerm_role_assignment.acr_pull) == 1
     )
     error_message = "The default path must continue to manage all three runtime role assignments."
+  }
+
+  assert {
+    condition     = length([for secret in azurerm_container_app.awreason.secret : secret if secret.name == "api-key"]) == 0
+    error_message = "Entra auth mode must not configure an API key secret."
   }
 }
 
@@ -62,6 +68,7 @@ run "deployment_reuses_external_identity_and_roles" {
     aoai_account_id                         = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/ai-rg/providers/Microsoft.CognitiveServices/accounts/example"
     azure_openai_endpoint                   = "https://example.openai.azure.com/"
     reasoning_deployment_01                 = "reasoning-model"
+    auth_mode                               = "entra"
   }
 
   assert {
@@ -84,5 +91,30 @@ run "deployment_reuses_external_identity_and_roles" {
   assert {
     condition     = output.managed_identity_client_id == "11111111-1111-1111-1111-111111111111"
     error_message = "The Container App must expose the reused identity client ID."
+  }
+}
+
+run "api_key_auth_configures_secret" {
+  command = plan
+
+  variables {
+    resource_group_name     = "app-rg"
+    location                = "eastus2"
+    container_app_env_id    = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/app-rg/providers/Microsoft.App/managedEnvironments/app-env"
+    acr_login_server        = "example.azurecr.io"
+    acr_id                  = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/acr-rg/providers/Microsoft.ContainerRegistry/registries/example"
+    blob_account_id         = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/storage-rg/providers/Microsoft.Storage/storageAccounts/example"
+    az_storage_name         = "example"
+    az_storage_rg           = "storage-rg"
+    aoai_account_id         = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/ai-rg/providers/Microsoft.CognitiveServices/accounts/example"
+    azure_openai_endpoint   = "https://example.openai.azure.com/"
+    reasoning_deployment_01 = "reasoning-model"
+    auth_mode               = "apikey"
+    api_key                 = "synthetic-test-key"
+  }
+
+  assert {
+    condition     = length([for secret in azurerm_container_app.awreason.secret : secret if secret.name == "api-key"]) == 1
+    error_message = "API-key auth mode must configure exactly one API key secret."
   }
 }

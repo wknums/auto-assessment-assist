@@ -1261,6 +1261,22 @@ _do_apply_impl() {
 }
 
 do_yaml() {
+  local auth_mode="${AUTH_MODE:-none}"
+  auth_mode="${auth_mode,,}"
+  case "$auth_mode" in
+    none|entra) ;;
+    apikey)
+      if [[ -z "${API_KEY:-}" ]]; then
+        echo "ERROR: API_KEY must be set when AUTH_MODE=apikey." >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "ERROR: AUTH_MODE must be one of: none, apikey, entra." >&2
+      return 1
+      ;;
+  esac
+
   validate_identity_reuse_configuration
   resolve_existing_managed_identity
   verify_reused_identity_role_assignments
@@ -1357,6 +1373,22 @@ do_yaml() {
     -e "s|{{ APPINSIGHTS_CONNECTION_STRING }}|${appi_conn_str}|g" \
     -e "s|{{ OTEL_ENDPOINT }}||g" \
     "${SCRIPT_DIR}/aca-containerapp.yaml" > "${resolved_yaml}"
+
+  if [[ "$auth_mode" != "apikey" ]]; then
+    sed -i \
+      -e '/^[[:space:]]*- name: API_KEY[[:space:]]*$/,+1d' \
+      -e '/^[[:space:]]*- name: api-key[[:space:]]*$/,+1d' \
+      "${resolved_yaml}"
+  fi
+
+  local non_ascii_byte_count
+  non_ascii_byte_count=$(LC_ALL=C tr -d '\11\12\15\40-\176' < "${resolved_yaml}" | wc -c | tr -d '[:space:]')
+  if [[ "$non_ascii_byte_count" != "0" ]]; then
+    echo "ERROR: Resolved ACA YAML contains non-ASCII characters." >&2
+    echo "       The Azure Container Apps CLI extension on Windows may decode YAML using the active system code page." >&2
+    echo "       Use ASCII-only values in the deployment environment file, then rerun deploy.sh yaml." >&2
+    return 1
+  fi
 
   echo "Generated: ${resolved_yaml}"
 

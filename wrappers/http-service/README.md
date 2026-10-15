@@ -258,6 +258,16 @@ The deploy script:
 - Loads deployment settings from `DEPLOY_ENV_FILE` when provided; otherwise defaults to repo-root `.env`.
 - For `yaml` deploys, injects critical runtime values from the selected env file, including auth mode, API key secret, AOAI deployment/version, retries, concurrency, and active-request tracking folder.
 
+`API_KEY` is required only when `AUTH_MODE=apikey`. For `AUTH_MODE=entra` or
+`AUTH_MODE=none`, Terraform and YAML deployments omit the Container Apps
+`api-key` secret and the `API_KEY` environment-variable reference.
+
+On Windows, the Container Apps Azure CLI extension can decode YAML using the
+active legacy system code page instead of UTF-8. The deployment template and
+generated manifest are therefore ASCII-only. `deploy.sh yaml` checks the
+generated file before calling Azure CLI and reports any non-ASCII value from the
+selected environment file rather than allowing a `charmap` decoding failure.
+
 ### REUSE flags
 
 | Flag | `TRUE` | `FALSE` |

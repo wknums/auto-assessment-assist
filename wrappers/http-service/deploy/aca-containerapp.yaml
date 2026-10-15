@@ -1,6 +1,6 @@
-# ══════════════════════════════════════════════════════════════════════
-#  Azure Container Apps – awreason HTTP Service manifest
-# ══════════════════════════════════════════════════════════════════════
+# =====================================================================
+# Azure Container Apps - awreason HTTP Service manifest
+# =====================================================================
 #
 #  Deploy with:
 #    az containerapp create --resource-group <rg> \
@@ -10,7 +10,7 @@
 #    az containerapp update --resource-group <rg> \
 #        --name awreason-http-service \
 #        --yaml deploy/aca-containerapp.yaml
-# ══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 type: Microsoft.App/containerApps
 location: {{ LOCATION }}              # e.g. eastus2
@@ -47,23 +47,23 @@ properties:
           cpu: 1.0
           memory: 2Gi
         env:
-          # ── General ──────────────────────────────────────
+          # General
           - name: APP_NAME
             value: awreason-http-service
           - name: LOG_LEVEL
             value: "{{ LOG_LEVEL }}"
 
-          # ── Working directory ────────────────────────────
+          # Working directory
           - name: WORKDIR_BASE
             value: /work
 
-          # ── Concurrency ─────────────────────────────────
+          # Concurrency
           - name: PER_REPLICA_CONCURRENCY
             value: "{{ PER_REPLICA_CONCURRENCY }}"
           - name: ACTIVE_REQUEST_IDS_DIR
             value: "{{ ACTIVE_REQUEST_IDS_DIR }}"
 
-          # ── Azure Blob Storage ──────────────────────────
+          # Azure Blob Storage
           - name: AZ_STORAGE_NAME
             value: "{{ AZ_STORAGE_NAME }}"
           - name: AZ_STORAGE_RG
@@ -73,14 +73,14 @@ properties:
           - name: BLOB_CONTAINER_UPLOADS
             value: uploads
 
-          # ── Azure OpenAI (direct) ───────────────────────
+          # Azure OpenAI (direct)
           - name: AZURE_OPENAI_ENDPOINT
             value: "{{ AZURE_OPENAI_ENDPOINT }}"
           # API key: only if NOT using MI; prefer Entra ID.
           # - name: AZURE_OPENAI_API_KEY
           #   secretRef: aoai-api-key
 
-          # ── APIM AI Gateway (optional) ──────────────────
+          # APIM AI Gateway (optional)
           - name: APIM_AOAI_BASE_URL
             value: "{{ APIM_AOAI_BASE_URL }}"
           - name: AOAI_DEPLOYMENT
@@ -99,9 +99,10 @@ properties:
           - name: USE_AAD_FOR_AOAI
             value: "{{ USE_AAD_FOR_AOAI }}"
 
-          # ── Auth (Entra ID JWT) ─────────────────────────
+          # API authentication
           - name: AUTH_MODE
             value: "{{ AUTH_MODE }}"
+          # Removed from the resolved manifest unless AUTH_MODE=apikey.
           - name: API_KEY
             secretRef: api-key
           - name: AAD_ISSUER
@@ -113,13 +114,13 @@ properties:
           - name: AAD_REQUIRED_APP_ROLE
             value: "{{ AAD_REQUIRED_APP_ROLE }}"
 
-          # ── Azure identity ──────────────────────────────
+          # Azure identity
           - name: AZURE_TENANT_ID
             value: "{{ AZURE_TENANT_ID }}"
           - name: AZURE_SUBSCRIPTION_ID
             value: "{{ AZURE_SUBSCRIPTION_ID }}"
 
-          # ── Streamlit Entra ID auth ─────────────────
+          # Streamlit Entra ID auth
           - name: CONTAINER_APP_NAME
             value: awreason-http-service
           - name: AAD_CLIENT_ID
@@ -139,7 +140,7 @@ properties:
           - name: AZURE_CLIENT_ID
             value: "{{ MANAGED_IDENTITY_CLIENT_ID }}"
 
-          # ── awreason runner ─────────────────────────────
+          # awreason runner
           - name: AWREASON_CLI_CMD
             value: /app/o1-assessment/awreason.py
           - name: AWREASON_CLI_TIMEOUT
@@ -149,7 +150,7 @@ properties:
           - name: AWREASON_RETRY_BACKOFF
             value: "{{ AWREASON_RETRY_BACKOFF }}"
 
-          # ── Telemetry (optional) ────────────────────────
+          # Telemetry (optional)
           - name: APPLICATIONINSIGHTS_CONNECTION_STRING
             value: "{{ APPINSIGHTS_CONNECTION_STRING }}"
           - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -190,10 +191,11 @@ properties:
             metadata:
               concurrentRequests: "{{ HTTP_SCALE_CONCURRENT_REQUESTS }}"
 
-  # ── Secrets ─────────────────────────────────────────────────
+  # Secrets
   secrets:
     - name: aad-client-secret
       value: "{{ AAD_CLIENT_SECRET }}"
+    # Removed from the resolved manifest unless AUTH_MODE=apikey.
     - name: api-key
       value: "{{ API_KEY }}"
   # Uncomment if using API-key auth instead of MI:

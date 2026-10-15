@@ -250,6 +250,11 @@ variable "auth_mode" {
   type        = string
   default     = "none"
   description = "API auth mode: none, apikey, or entra."
+
+  validation {
+    condition     = contains(["none", "apikey", "entra"], lower(var.auth_mode))
+    error_message = "auth_mode must be one of: none, apikey, entra."
+  }
 }
 
 variable "api_key" {
@@ -305,6 +310,7 @@ locals {
   managed_identity_id                  = var.reuse_managed_identity ? one(data.azurerm_user_assigned_identity.awreason[*].id) : one(azurerm_user_assigned_identity.awreason[*].id)
   managed_identity_client_id           = var.reuse_managed_identity ? one(data.azurerm_user_assigned_identity.awreason[*].client_id) : one(azurerm_user_assigned_identity.awreason[*].client_id)
   managed_identity_principal_id        = var.reuse_managed_identity ? one(data.azurerm_user_assigned_identity.awreason[*].principal_id) : one(azurerm_user_assigned_identity.awreason[*].principal_id)
+  use_api_key_auth                     = lower(var.auth_mode) == "apikey"
 }
 
 moved {
@@ -394,9 +400,12 @@ resource "azurerm_container_app" "awreason" {
     value = var.aad_client_secret
   }
 
-  secret {
-    name  = "api-key"
-    value = var.api_key
+  dynamic "secret" {
+    for_each = local.use_api_key_auth ? [var.api_key] : []
+    content {
+      name  = "api-key"
+      value = secret.value
+    }
   }
 
   ingress {
@@ -490,9 +499,12 @@ resource "azurerm_container_app" "awreason" {
         value = var.auth_mode
       }
 
-      env {
-        name        = "API_KEY"
-        secret_name = "api-key"
+      dynamic "env" {
+        for_each = local.use_api_key_auth ? [1] : []
+        content {
+          name        = "API_KEY"
+          secret_name = "api-key"
+        }
       }
 
       env {
@@ -627,6 +639,13 @@ resource "azurerm_container_app" "awreason" {
         interval_seconds        = 15
         failure_count_threshold = 3
       }
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = !local.use_api_key_auth || length(trimspace(var.api_key)) > 0
+      error_message = "api_key must be set when auth_mode is apikey."
     }
   }
 }
